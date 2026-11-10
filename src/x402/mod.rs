@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use policy::compiled::PaymentRequirement;
 use serde_json::Value;
 
-use crate::counters::ClaimGuard;
+use crate::counters::{ClaimGuard, UnknownSettlement};
 use crate::error::{error_response, uncacheable_error};
 use crate::proxy::strip_framing;
 pub use facilitator::FacilitatorClient;
@@ -62,6 +62,8 @@ pub enum ChargeOutcome {
     UpstreamFailed,
     /// The facilitator or the claim store couldn't be used.
     Unavailable,
+    /// Settlement was attempted and its outcome is unknown; the payment stays claimed.
+    Unknown,
 }
 
 impl ChargeOutcome {
@@ -72,6 +74,7 @@ impl ChargeOutcome {
             Self::Paid => "paid",
             Self::UpstreamFailed => "upstream_failed",
             Self::Unavailable => "payment_unavailable",
+            Self::Unknown => "settlement_unknown",
         }
     }
 }
@@ -255,25 +258,24 @@ where
     match ctx.claims.claim(&id, ctx.claim_ttl).await {
         Ok(true) => {}
         Ok(false) => {
-            return (
-                payment_required_response(
-                    requirements,
-                    "this payment has already been used; sign a new one",
+            // A payment whose settlement didn't conclude may still be charged, so its repeat is
+            // told that again, never to sign a new payment.
+            return match ctx.claims.unknown(&id).await {
+                Ok(Some(unknown)) => (
+                    settlement_unknown(unknown.payment_response.as_deref()),
+                    ChargeOutcome::Unknown,
                 ),
-                ChargeOutcome::Challenged,
-            );
-        }
-        Err(error) => {
-            tracing::error!(error = %error, "payment claim failed");
-            return (
-                uncacheable_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "payment_unavailable",
-                    "payments can't be taken right now",
+                Ok(None) => (
+                    payment_required_response(
+                        requirements,
+                        "this payment has already been used; sign a new one",
+                    ),
+                    ChargeOutcome::Challenged,
                 ),
-                ChargeOutcome::Unavailable,
-            );
+                Err(error) => claim_failed(error),
+            };
         }
+        Err(error) => return claim_failed(error),
     }
 
     let (response, outcome, keep_claim) = claimed(
@@ -288,6 +290,17 @@ where
     .await;
     if !keep_claim && let Err(error) = ctx.claims.release(&id).await {
         tracing::error!(error = %error, "payment release failed");
+    }
+    if outcome == ChargeOutcome::Unknown {
+        let payment_response = response
+            .headers()
+            .get(PAYMENT_RESPONSE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let unknown = UnknownSettlement { payment_response };
+        if let Err(error) = ctx.claims.mark_unknown(&id, unknown).await {
+            tracing::error!(error = %error, "payment mark failed");
+        }
     }
     (response, outcome)
 }
@@ -331,8 +344,8 @@ where
 
     // From here the payment stays claimed, whatever the facilitator answers: it may have
     // broadcast the transfer before something failed (a timeout, a lost connection, a failed
-    // receipt wait it reports as `success: false`), and the transfer can still land. The buyer
-    // signs a new payment, as the facilitator would require for a retry of a failed one anyway.
+    // receipt wait it reports as `settlement_pending`), and the transfer can still land. Only a
+    // refusal asks the buyer for a new payment; any other failure is answered as unknown.
     let (parts, body) = response.into_parts();
     let body = match buffer(body, ctx.paid_body_limit).await {
         Ok(body) => body,
@@ -351,23 +364,41 @@ where
     };
     let settlement = match ctx.facilitator.settle(facilitator, payload, offered).await {
         Ok(settlement) => settlement,
-        Err(error) => return (facilitator_failed(error), ChargeOutcome::Unavailable, true),
+        Err(error) => {
+            tracing::error!(error = %error, network = offered.network, "settlement outcome unknown");
+            return (settlement_unknown(None), ChargeOutcome::Unknown, true);
+        }
     };
     if !settlement.success {
         let reason = settlement
             .error_reason
             .as_deref()
             .unwrap_or("unknown reason");
-        if settlement.transaction.is_empty() {
-            tracing::warn!(reason, "settlement failed");
-        } else {
-            // A failure that names a transaction may still settle: log it for the seller to
-            // reconcile. Hashes, networks and payers are fine to log; the payment itself is not.
+        // Hashes, networks and payers are fine to log; the payment itself is not.
+        if !refused(&settlement) {
             tracing::error!(
                 reason,
                 transaction = settlement.transaction,
                 network = settlement.network,
-                "settlement reported failed after a transaction"
+                "settlement outcome unknown"
+            );
+            let header =
+                (!settlement.transaction.is_empty()).then(|| types::encode_header(&settlement));
+            return (
+                settlement_unknown(header.as_deref()),
+                ChargeOutcome::Unknown,
+                true,
+            );
+        }
+        if settlement.transaction.is_empty() {
+            tracing::warn!(reason, "settlement failed");
+        } else {
+            // The transaction failed on chain: logged for the seller to reconcile.
+            tracing::error!(
+                reason,
+                transaction = settlement.transaction,
+                network = settlement.network,
+                "settlement failed after a transaction"
             );
         }
         let mut failed =
@@ -413,6 +444,45 @@ async fn buffer(mut body: Body, limit: usize) -> Result<Body, axum::Error> {
     );
     let head = futures_util::stream::iter([Ok::<_, axum::Error>(Bytes::from(prefix))]);
     Ok(Body::from_stream(head.chain(body.into_data_stream())))
+}
+
+/// Whether a failed settlement is a refusal, so the transfer can't land and the buyer may pay
+/// again: the facilitator gave a reason and broadcast nothing, or the transaction it names failed
+/// on chain (`invalid_transaction_state`). `settlement_pending`, and any other failure that names
+/// a transaction, may still land.
+fn refused(settlement: &SettleResponse) -> bool {
+    match settlement.error_reason.as_deref() {
+        Some("settlement_pending") => false,
+        Some("invalid_transaction_state") => true,
+        _ => settlement.transaction.is_empty(),
+    }
+}
+
+/// A 503 without payment terms for a payment whose settlement didn't conclude, with the
+/// facilitator's `PAYMENT-RESPONSE` when it named a transaction, so the buyer can look it up.
+fn settlement_unknown(payment_response: Option<&str>) -> Response {
+    let mut response = uncacheable_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "settlement_unknown",
+        "the payment's settlement outcome is unknown and it may still be charged: don't repeat \
+         this payment or sign a new one for this request",
+    );
+    if let Some(value) = payment_response.and_then(|value| HeaderValue::from_str(value).ok()) {
+        response.headers_mut().insert(PAYMENT_RESPONSE, value);
+    }
+    response
+}
+
+fn claim_failed(error: crate::counters::ClaimError) -> (Response, ChargeOutcome) {
+    tracing::error!(error = %error, "payment claim failed");
+    (
+        uncacheable_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "payment_unavailable",
+            "payments can't be taken right now",
+        ),
+        ChargeOutcome::Unavailable,
+    )
 }
 
 fn facilitator_failed(error: facilitator::FacilitatorError) -> Response {

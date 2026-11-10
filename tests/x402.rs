@@ -674,7 +674,6 @@ fn failed_settlement(reason: &str, transaction: &str) -> Value {
 }
 
 #[tokio::test]
-#[ignore = "answers 402 \"settlement failed: <reason>\" with fresh terms, also to a 503 with a verdict as its body; a retry is told to sign a new payment"]
 async fn a_settlement_whose_outcome_is_unknown_keeps_the_payment() {
     let hash = "0x5c1e0f3a9b7d2c4e6f8a0b1c3d5e7f9a2b4c6d8e0f1a3b5c7d9e2f4a6b8c0d1e";
     for (case, status, answer, transaction, nonce) in [

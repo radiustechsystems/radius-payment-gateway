@@ -23,10 +23,22 @@ pub trait CounterStore: Send + Sync {
 #[error("the claim store is unavailable")]
 pub struct ClaimError;
 
+/// A claimed payment whose settlement was attempted without a verdict, so the transfer may still
+/// land. A repeat of the payment is told so, with the `PAYMENT-RESPONSE` value the facilitator's
+/// answer gave when it named a transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSettlement {
+    pub payment_response: Option<String>,
+}
+
 #[async_trait]
 pub trait ClaimGuard: Send + Sync {
     /// Claims `id` for `ttl`. False when it's already claimed.
     async fn claim(&self, id: &str, ttl: Duration) -> Result<bool, ClaimError>;
     /// Releases a claim before its expiry, for a payment that wasn't used after all.
     async fn release(&self, id: &str) -> Result<(), ClaimError>;
+    /// Records that the claimed payment's settlement outcome is unknown, until the claim expires.
+    async fn mark_unknown(&self, id: &str, unknown: UnknownSettlement) -> Result<(), ClaimError>;
+    /// The claimed payment's unknown settlement, if one was recorded.
+    async fn unknown(&self, id: &str) -> Result<Option<UnknownSettlement>, ClaimError>;
 }

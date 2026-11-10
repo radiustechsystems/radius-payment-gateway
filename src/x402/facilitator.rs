@@ -1,7 +1,7 @@
 //! The facilitator's `/supported`, `/verify` and `/settle`, as x402 version 2 defines them. A
-//! verdict comes back however the facilitator sends it: some answer a refusal with an error
-//! status and the verdict as the body. Anything that isn't a verdict, or no answer in time, is an
-//! error.
+//! verdict comes back however the facilitator sends it: some answer a refusal with a 4xx status
+//! and the verdict as the body. A 5xx, anything else that isn't a verdict, or no answer in time,
+//! is an error.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -172,6 +172,10 @@ impl FacilitatorClient {
                 source,
             })?;
         let status = response.status();
+        // A 5xx is the facilitator failing, whatever its body says, so it's not a verdict.
+        if status.is_server_error() {
+            return Err(FacilitatorError::NoVerdict { url, status });
+        }
         let verdict: Value = response.json().await.unwrap_or(Value::Null);
         if !verdict.get(verdict_field).is_some_and(Value::is_boolean) {
             return Err(FacilitatorError::NoVerdict { url, status });

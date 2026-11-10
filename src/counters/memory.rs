@@ -9,17 +9,31 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 
-use super::{ClaimError, ClaimGuard, CounterStore, CounterUnavailable};
+use super::{ClaimError, ClaimGuard, CounterStore, CounterUnavailable, UnknownSettlement};
 
 struct Count {
     value: u64,
     expires: Instant,
 }
 
+struct Claim {
+    expires: Instant,
+    unknown: Option<UnknownSettlement>,
+}
+
+impl Claim {
+    fn new(expires: Instant) -> Self {
+        Self {
+            expires,
+            unknown: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct MemoryStore {
     counters: DashMap<String, Count>,
-    claims: DashMap<String, Instant>,
+    claims: DashMap<String, Claim>,
 }
 
 impl MemoryStore {
@@ -32,7 +46,7 @@ impl MemoryStore {
     pub fn sweep(&self) {
         let now = Instant::now();
         self.counters.retain(|_, count| count.expires > now);
-        self.claims.retain(|_, expires| *expires > now);
+        self.claims.retain(|_, claim| claim.expires > now);
     }
 
     /// Sweeps every `every` for as long as the store is alive.
@@ -89,13 +103,13 @@ impl ClaimGuard for MemoryStore {
     async fn claim(&self, id: &str, ttl: Duration) -> Result<bool, ClaimError> {
         let now = Instant::now();
         Ok(match self.claims.entry(id.to_owned()) {
-            Entry::Occupied(mut occupied) if *occupied.get() <= now => {
-                occupied.insert(now + ttl);
+            Entry::Occupied(mut occupied) if occupied.get().expires <= now => {
+                occupied.insert(Claim::new(now + ttl));
                 true
             }
             Entry::Occupied(_) => false,
             Entry::Vacant(vacant) => {
-                vacant.insert(now + ttl);
+                vacant.insert(Claim::new(now + ttl));
                 true
             }
         })
@@ -104,6 +118,22 @@ impl ClaimGuard for MemoryStore {
     async fn release(&self, id: &str) -> Result<(), ClaimError> {
         self.claims.remove(id);
         Ok(())
+    }
+
+    async fn mark_unknown(&self, id: &str, unknown: UnknownSettlement) -> Result<(), ClaimError> {
+        if let Some(mut claim) = self.claims.get_mut(id) {
+            claim.unknown = Some(unknown);
+        }
+        Ok(())
+    }
+
+    async fn unknown(&self, id: &str) -> Result<Option<UnknownSettlement>, ClaimError> {
+        let now = Instant::now();
+        Ok(self
+            .claims
+            .get(id)
+            .filter(|claim| claim.expires > now)
+            .and_then(|claim| claim.unknown.clone()))
     }
 }
 
@@ -133,5 +163,25 @@ mod tests {
         assert_eq!(store.claim("p", Duration::from_secs(60)).await, Ok(true));
         assert_eq!(store.claim("q", Duration::ZERO).await, Ok(true));
         assert_eq!(store.claim("q", Duration::from_secs(60)).await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn remembers_an_unknown_settlement_while_claimed() {
+        let store = MemoryStore::new();
+        let unknown = UnknownSettlement {
+            payment_response: Some("e30=".to_owned()),
+        };
+        assert_eq!(store.claim("p", Duration::from_secs(60)).await, Ok(true));
+        assert_eq!(store.unknown("p").await, Ok(None));
+        store.mark_unknown("p", unknown.clone()).await.unwrap();
+        assert_eq!(store.unknown("p").await, Ok(Some(unknown.clone())));
+        // Only a claimed payment is marked, and a new claim starts without the mark.
+        store.mark_unknown("q", unknown.clone()).await.unwrap();
+        assert_eq!(store.unknown("q").await, Ok(None));
+        assert_eq!(store.claim("r", Duration::ZERO).await, Ok(true));
+        store.mark_unknown("r", unknown).await.unwrap();
+        assert_eq!(store.unknown("r").await, Ok(None));
+        assert_eq!(store.claim("r", Duration::from_secs(60)).await, Ok(true));
+        assert_eq!(store.unknown("r").await, Ok(None));
     }
 }

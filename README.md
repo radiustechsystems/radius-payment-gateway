@@ -46,11 +46,12 @@ Error responses are JSON `{"code": "…", "message": "…"}`:
 | --- | --- | --- |
 | `PAYMENT-SIGNATURE` isn't a base64 JSON payload | 400 | `invalid_payment` |
 | Percent-decoding the path would select another rule | 400 | `ambiguous_path` |
-| Payment required, or a payment that wasn't accepted / didn't verify / failed to settle | 402 | (the body is the x402 challenge, with `error`) |
+| Payment required, or a payment that wasn't accepted / didn't verify / was refused at settlement | 402 | (the body is the x402 challenge, with `error`) |
 | Unmatched request under `unmatched: deny` | 403 | `no_matching_rule` |
 | Over a rate limit | 429 | `rate_limited` |
 | Upstream unreachable / didn't answer in time | 502 / 504 | `upstream_unavailable` / `upstream_timeout` |
-| Facilitator unreachable or answered without a verdict | 502 | `facilitator_unavailable` |
+| Facilitator unreachable at `/verify`, or answered a 5xx or without a verdict | 502 | `facilitator_unavailable` |
+| Settlement's outcome unknown: `settlement_pending`, a failure other than `invalid_transaction_state` that names a transaction, or no verdict from `/settle` (timeout, 5xx). The content is withheld, the payment stays claimed, `PAYMENT-RESPONSE` carries the transaction when there is one, and a repeat of the payment gets the same answer | 503 | `settlement_unknown` |
 | No policy ever loaded and `NO_POLICY=deny` | 503 | `policy_unavailable` |
 | The claim store failed | 503 | `payment_unavailable` |
 
