@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use clap::Parser;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use radius_gateway::{App, Config};
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -61,6 +61,11 @@ async fn echo(request: Request) -> Response {
     response
         .headers_mut()
         .insert("x-echo-method", parts.method.as_str().parse().unwrap());
+    if let Some(value) = parts.headers.get("x-echo-cache-control") {
+        response
+            .headers_mut()
+            .insert("cache-control", value.clone());
+    }
     response
 }
 
@@ -97,6 +102,22 @@ async fn big(Path(n): Path<usize>) -> Response {
     Response::new(Body::from(vec![b'x'; n]))
 }
 
+/// Response headers and one chunk, then a body that never ends.
+async fn stall() -> Response {
+    let first = stream::iter([Ok::<_, Infallible>(Bytes::from_static(b"chunk0\n"))]);
+    Response::new(Body::from_stream(first.chain(stream::pending())))
+}
+
+/// Response headers and one chunk, then, a moment later, a body that fails.
+async fn broken() -> Response {
+    let first = stream::iter([Ok(Bytes::from_static(b"chunk0\n"))]);
+    let failure = stream::once(async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Err(std::io::Error::other("the upstream failed mid-body"))
+    });
+    Response::new(Body::from_stream(first.chain(failure)))
+}
+
 /// Starts the echo upstream on a free port.
 pub async fn spawn_upstream() -> SocketAddr {
     let router = Router::new()
@@ -104,6 +125,8 @@ pub async fn spawn_upstream() -> SocketAddr {
         .route("/status/{code}", any(status))
         .route("/big/{n}", get(big))
         .route("/paid/big/{n}", get(big))
+        .route("/paid/stall", get(stall))
+        .route("/paid/broken", get(broken))
         .fallback(echo);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
