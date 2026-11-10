@@ -309,7 +309,12 @@ async fn no_policy_is_the_gateways_own_setting() {
         .unwrap();
     assert_eq!(ready.status(), 503);
 
-    let allowing = Gateway::spawn(&format!("http://{upstream}"), &platform.uri(), &[]).await;
+    let allowing = Gateway::spawn(
+        &format!("http://{upstream}"),
+        &platform.uri(),
+        &["--no-policy", "allow"],
+    )
+    .await;
     let response = client().get(allowing.url("/x")).send().await.unwrap();
     assert_eq!(response.status(), 200);
     let ready = client()
@@ -356,7 +361,6 @@ async fn refuses_paths_whose_encoding_changes_the_rule() {
 }
 
 #[tokio::test]
-#[ignore = "forwards every request, paid routes included, until the first policy loads"]
 async fn refuses_everything_before_the_first_policy_by_default() {
     let upstream = spawn_upstream().await;
     let platform = MockServer::start().await;

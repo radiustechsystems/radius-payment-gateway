@@ -77,7 +77,7 @@ pub struct Config {
 
     /// What to do with requests while no policy has ever been loaded (gate standard,
     /// `failure.no_policy`): pass them through, or answer 503 `policy_unavailable`.
-    #[arg(long, env = "NO_POLICY", value_enum, default_value_t = NoPolicy::Allow, ignore_case = true)]
+    #[arg(long, env = "NO_POLICY", value_enum, default_value_t = NoPolicy::Deny, ignore_case = true)]
     pub no_policy: NoPolicy,
 
     /// `maxTimeoutSeconds` offered in payment challenges: how long a signed payment stays valid.
@@ -228,7 +228,7 @@ mod tests {
         let config = parse(&[]).unwrap();
         assert_eq!(config.listen.to_string(), "0.0.0.0:8080");
         assert_eq!(config.poll_interval, Duration::from_secs(30));
-        assert_eq!(config.no_policy, NoPolicy::Allow);
+        assert_eq!(config.no_policy, NoPolicy::Deny);
         assert_eq!(config.paid_body_limit, 10 * 1024 * 1024);
         assert_eq!(
             config.platform_api_url,
