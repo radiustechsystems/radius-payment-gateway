@@ -1,0 +1,78 @@
+[package]
+name = "radius-gateway"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "A reverse proxy that enforces a Radius Platform compiled policy in front of an API: allow, deny, rate limit, or charge with x402."
+publish = false
+
+[lib]
+name = "radius_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "radius-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Radius Platform: the compiled policy types and the reference evaluator (docs/gates/standard.md
+# says gates SHOULD embed it). Both crates must be pinned to the same revision, or two copies of
+# `domain` end up in the build and `policy::Compiled`'s types don't unify. Bump both together.
+policy = { git = "ssh://git@github.com/radiustechsystems/radius-platform.git", rev = "4566e185546069adcc4955d222a63e91557ca765" }
+domain = { git = "ssh://git@github.com/radiustechsystems/radius-platform.git", rev = "4566e185546069adcc4955d222a63e91557ca765" }
+alloy-primitives = { version = "1.7", default-features = false, features = ["std", "serde"] }
+uuid = { version = "1", features = ["serde"] }
+
+# HTTP server and upstream proxy
+axum = { version = "0.8", features = ["http1", "http2", "json", "tokio"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["request-id", "util"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "aws-lc-rs", "webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+
+# Platform API and facilitator calls
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+
+# Runtime, configuration, serialization
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+clap = { version = "4", features = ["derive", "env"] }
+humantime = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+arc-swap = "1"
+dashmap = "6"
+async-trait = "0.1"
+base64 = "0.22"
+sha2 = "0.10"
+percent-encoding = "2"
+rand = "0.9"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
