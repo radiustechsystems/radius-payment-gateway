@@ -67,7 +67,7 @@ Every setting is a flag or an environment variable; flags win.
 | `--listen` | `LISTEN` | `0.0.0.0:8080` | Where nginx sends traffic |
 | `--admin-listen` | `ADMIN_LISTEN` | `127.0.0.1:9901` | `/healthz`, `/readyz`, `/policy`, `POST /policy/refresh`. Unauthenticated: keep it private |
 | `--upstream` | `UPSTREAM` | required | Your API: `http://127.0.0.1:3000`, `https://api.internal/v1` (a path is a prefix) |
-| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `30s` | Time to the upstream's response headers |
+| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `30s` | Time to the upstream's response headers, and again to the buffered part of a paid response's body |
 | `--upstream-connect-timeout` | `UPSTREAM_CONNECT_TIMEOUT` | `5s` | |
 | `--platform-api-url` | `PLATFORM_API_URL` | `https://platform-api.radiustech.xyz` | |
 | `--platform-api-key` | `PLATFORM_API_KEY` | required | An organization API key with `endpoints:read` |

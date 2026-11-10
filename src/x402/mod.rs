@@ -20,7 +20,8 @@ use serde_json::Value;
 
 use crate::counters::{ClaimGuard, UnknownSettlement};
 use crate::error::{error_response, uncacheable_error};
-use crate::proxy::strip_framing;
+use crate::gate::upstream_failed;
+use crate::proxy::{UpstreamError, strip_framing};
 pub use facilitator::FacilitatorClient;
 pub use types::{PaymentRequired, PaymentRequirements, ResourceInfo, SettleResponse};
 
@@ -45,6 +46,8 @@ pub struct ChargeContext<'a> {
     pub claims: &'a dyn ClaimGuard,
     pub claim_ttl: Duration,
     pub paid_body_limit: usize,
+    /// The upstream's timeout, which also bounds the read of a paid body before settlement.
+    pub upstream_timeout: Duration,
     pub max_timeout_seconds: u32,
     pub public_url: Option<&'a str>,
 }
@@ -349,14 +352,13 @@ where
         return (response, ChargeOutcome::UpstreamFailed, false);
     }
 
-    // From here the payment stays claimed, whatever the facilitator answers: it may have
-    // broadcast the transfer before something failed (a timeout, a lost connection, a failed
-    // receipt wait it reports as `settlement_pending`), and the transfer can still land. Only a
-    // refusal asks the buyer for a new payment; any other failure is answered as unknown.
+    // A body that fails or doesn't arrive in time is an upstream failure like any other:
+    // nothing was settled, so the payment can be tried again.
     let (parts, body) = response.into_parts();
-    let body = match buffer(body, ctx.paid_body_limit).await {
-        Ok(body) => body,
-        Err(error) => {
+    let buffered = tokio::time::timeout(ctx.upstream_timeout, buffer(body, ctx.paid_body_limit));
+    let body = match buffered.await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => {
             tracing::warn!(error = %error, "upstream body failed before settlement");
             return (
                 error_response(
@@ -365,10 +367,19 @@ where
                     "the upstream's response failed",
                 ),
                 ChargeOutcome::UpstreamFailed,
-                true,
+                false,
             );
         }
+        Err(_) => {
+            let error = UpstreamError::Timeout(ctx.upstream_timeout);
+            return (upstream_failed(error), ChargeOutcome::UpstreamFailed, false);
+        }
     };
+
+    // From here the payment stays claimed, whatever the facilitator answers: it may have
+    // broadcast the transfer before something failed (a timeout, a lost connection, a failed
+    // receipt wait it reports as `settlement_pending`), and the transfer can still land. Only a
+    // refusal asks the buyer for a new payment; any other failure is answered as unknown.
     let settlement = match ctx.facilitator.settle(facilitator, payload, offered).await {
         Ok(settlement) => settlement,
         Err(error) => {

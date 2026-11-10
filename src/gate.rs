@@ -122,6 +122,7 @@ impl Gate {
                     claims: self.claims.as_ref(),
                     claim_ttl: self.payments.claim_ttl,
                     paid_body_limit: self.payments.paid_body_limit,
+                    upstream_timeout: self.upstream.timeout(),
                     max_timeout_seconds: self.payments.max_timeout_seconds,
                     public_url: self.payments.public_url.as_deref(),
                 };

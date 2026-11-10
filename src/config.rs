@@ -30,7 +30,8 @@ pub struct Config {
     #[arg(long, env = "UPSTREAM", value_parser = parse_upstream)]
     pub upstream: Uri,
 
-    /// How long to wait for the upstream's response headers.
+    /// How long to wait for the upstream's response headers, and again for the part of a paid
+    /// response's body that is buffered before settlement.
     #[arg(long, env = "UPSTREAM_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
     pub upstream_timeout: Duration,
 

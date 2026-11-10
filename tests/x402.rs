@@ -809,7 +809,6 @@ fn impatient(timeout: Duration) -> reqwest::Client {
 }
 
 #[tokio::test]
-#[ignore = "waits for a stalled paid body forever, holding the payment's claim"]
 async fn a_stalled_paid_body_times_out_and_releases_the_payment() {
     let world = World::start().await;
     world.verify_answers(200, json!({ "isValid": true })).await;
@@ -833,7 +832,6 @@ async fn a_stalled_paid_body_times_out_and_releases_the_payment() {
 }
 
 #[tokio::test]
-#[ignore = "keeps the claim of a payment whose upstream body failed before settlement"]
 async fn a_failed_paid_body_releases_the_payment() {
     let world = World::start().await;
     world.verify_answers(200, json!({ "isValid": true })).await;
