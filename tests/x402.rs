@@ -955,7 +955,6 @@ async fn shared_caches_dont_store_paid_responses() {
 }
 
 #[tokio::test]
-#[ignore = "follows a /verify redirect, sending the signed payment to another host"]
 async fn doesnt_follow_a_facilitator_redirect() {
     let world = World::start().await;
     let elsewhere = MockServer::start().await;

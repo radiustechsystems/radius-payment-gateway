@@ -38,8 +38,11 @@ pub struct FacilitatorClient {
 
 impl FacilitatorClient {
     pub fn new(timeout: Duration) -> anyhow::Result<Self> {
+        // reqwest follows up to 10 redirects by default, and a 307 or 308 would resend the
+        // signed payment to wherever it points. A redirect is answered as no verdict instead.
         let http = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("radius-gateway/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
