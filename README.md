@@ -75,7 +75,7 @@ Every setting is a flag or an environment variable; flags win.
 | `--organization-id` | `ORGANIZATION_ID` | required | `org_…` |
 | `--project-id` | `PROJECT_ID` | required | The project whose policy is enforced |
 | `--poll-interval` | `POLL_INTERVAL` | `30s` | How often to ask for a newer policy (at least `1s`) |
-| `--startup-policy-wait` | `STARTUP_POLICY_WAIT` | `5s` | How long startup waits for the first policy |
+| `--startup-policy-wait` | `STARTUP_POLICY_WAIT` | `5s` | How long startup waits for the first policy. Until one loads, a failed fetch is retried after 1s, doubling up to 15s |
 | `--public-url` | `PUBLIC_URL` | | The URL buyers reach you at (`https://api.example.com`), the base of `resource.url` in challenges. Set it in production |
 | `--no-policy` | `NO_POLICY` | `deny` | What happens before the first policy loads: `deny` (503) or `allow` (every request is forwarded, paid routes free) |
 | `--max-timeout-seconds` | `MAX_TIMEOUT_SECONDS` | `60` | `maxTimeoutSeconds` offered to buyers |

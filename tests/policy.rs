@@ -379,7 +379,6 @@ async fn refuses_everything_before_the_first_policy_by_default() {
 }
 
 #[tokio::test]
-#[ignore = "after a failed first fetch, waits a whole POLL_INTERVAL before fetching again"]
 async fn retries_a_failed_first_fetch_soon() {
     let upstream = spawn_upstream().await;
     let platform = MockServer::start().await;

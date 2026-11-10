@@ -12,6 +12,11 @@ use super::store::{Loaded, Offer, PolicyHandle};
 use super::validate::validate;
 use crate::x402::FacilitatorClient;
 
+/// Until the first policy loads, a failed fetch is retried after this, doubling up to
+/// `FIRST_RETRY_MAX` (and never later than the poll interval), instead of a whole interval later.
+const FIRST_RETRY: Duration = Duration::from_secs(1);
+const FIRST_RETRY_MAX: Duration = Duration::from_secs(15);
+
 pub struct Poller {
     client: PlatformClient,
     handle: Arc<PolicyHandle>,
@@ -126,19 +131,51 @@ impl Poller {
     }
 
     /// Polls forever, `interval` apart (give or take 10%, so replicas don't poll in step). With
-    /// `first_now`, the first poll happens at once; otherwise after one interval.
+    /// `first_now`, the first poll happens at once; otherwise after one wait. While no policy has
+    /// ever loaded, the wait is a short backoff (`FIRST_RETRY` doubling to `FIRST_RETRY_MAX`).
     pub async fn run(self: Arc<Self>, first_now: bool) {
+        let mut retry = FIRST_RETRY;
         if !first_now {
-            tokio::time::sleep(self.jittered()).await;
+            tokio::time::sleep(self.next_wait(&mut retry)).await;
         }
         loop {
             let _ = self.poll_once().await;
-            tokio::time::sleep(self.jittered()).await;
+            tokio::time::sleep(self.next_wait(&mut retry)).await;
         }
+    }
+
+    fn next_wait(&self, retry: &mut Duration) -> Duration {
+        if self.handle.load().is_some() {
+            return self.jittered();
+        }
+        first_retry(retry, self.interval)
     }
 
     fn jittered(&self) -> Duration {
         let factor: f64 = rand::random_range(0.9..1.1);
         self.interval.mul_f64(factor).max(Duration::from_secs(1))
+    }
+}
+
+/// The wait after a failed fetch while no policy has loaded: `retry`, but never longer than
+/// `interval`. `retry` then doubles, up to `FIRST_RETRY_MAX`.
+fn first_retry(retry: &mut Duration, interval: Duration) -> Duration {
+    let wait = (*retry).min(interval);
+    *retry = (*retry * 2).min(FIRST_RETRY_MAX);
+    wait
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backs_off_from_one_second_to_fifteen_within_the_interval() {
+        for (interval, waits) in [(3600, [1, 2, 4, 8, 15, 15]), (3, [1, 2, 3, 3, 3, 3])] {
+            let mut retry = FIRST_RETRY;
+            let interval = Duration::from_secs(interval);
+            let got = waits.map(|_| first_retry(&mut retry, interval).as_secs());
+            assert_eq!(got, waits, "POLL_INTERVAL={interval:?}");
+        }
     }
 }
