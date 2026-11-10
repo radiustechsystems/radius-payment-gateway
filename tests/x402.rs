@@ -592,7 +592,6 @@ async fn settles_large_responses_on_their_status_and_streams_them() {
 }
 
 #[tokio::test]
-#[ignore = "serves a re-encoded Permit2 payment again and settles it twice: the claim key is the header text"]
 async fn serves_a_permit2_payment_once_however_it_is_encoded() {
     let world = World::start().await;
     world
