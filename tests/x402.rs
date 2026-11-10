@@ -763,7 +763,6 @@ fn payload_for(url: &str, nonce: &str) -> Value {
 }
 
 #[tokio::test]
-#[ignore = "accepts a payment whose resource.url names another route with the same terms"]
 async fn refuses_a_payment_made_out_for_another_resource() {
     let world = World::start().await;
     world

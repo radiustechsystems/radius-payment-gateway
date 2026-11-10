@@ -233,6 +233,13 @@ where
             ChargeOutcome::Challenged,
         );
     }
+    if let Some(other) = other_resource(&payload, &requirements.resource.url) {
+        let error = format!("the payment is for {other}, not this resource");
+        return (
+            payment_required_response(requirements, &error),
+            ChargeOutcome::Challenged,
+        );
+    }
     let accepted = payload["accepted"].as_object().expect("checked above");
     let Some(index) = requirements
         .accepts
@@ -420,6 +427,24 @@ where
         .insert(PAYMENT_RESPONSE, encode(&settlement));
     strip_framing(paid.headers_mut());
     (paid, ChargeOutcome::Paid, true)
+}
+
+/// The resource a payment names when it isn't `resource_url`, the one this request's challenge
+/// names; none when they're the same or the payment names none (no `resource.url` string). Both
+/// are compared as the WHATWG URL Standard serializes them (scheme and host in lower case, a
+/// default port dropped, dot segments resolved), without a fragment. The buyer's signature
+/// doesn't cover `resource`, so this catches a payment presented at the wrong route and binds
+/// nothing.
+fn other_resource(payload: &Value, resource_url: &str) -> Option<String> {
+    let named = payload.pointer("/resource/url")?.as_str()?;
+    let canonical = |text: &str| {
+        reqwest::Url::parse(text).ok().map(|mut url| {
+            url.set_fragment(None);
+            url
+        })
+    };
+    let same = canonical(named).is_some_and(|url| Some(url) == canonical(resource_url));
+    (!same).then(|| named.to_owned())
 }
 
 /// Reads the body up to `limit` bytes. A body that fits is returned whole, so it's known to be
