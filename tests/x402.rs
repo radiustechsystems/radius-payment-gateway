@@ -983,7 +983,6 @@ async fn doesnt_follow_a_facilitator_redirect() {
 }
 
 #[tokio::test]
-#[ignore = "answers 200 to a payment signed to another recipient, for another amount or for another token: only `accepted` is compared with the offer"]
 async fn refuses_a_payment_signed_for_other_terms() {
     let world = World::start().await;
     world

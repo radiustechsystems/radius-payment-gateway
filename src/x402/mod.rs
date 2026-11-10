@@ -264,6 +264,14 @@ where
         .clone()
         .unwrap_or_default();
     let offered = requirements.accepts[index].clone();
+    // Checked here so that a facilitator that doesn't check the signed terms can't settle them.
+    if let Some((field, offered_field)) = offered.signed_mismatch(&payload) {
+        let error = format!("the signed {field} doesn't match the offered {offered_field}");
+        return (
+            payment_required_response(requirements, &error),
+            ChargeOutcome::Challenged,
+        );
+    }
 
     let id = claim::payment_id(&payload, &signature);
     match ctx.claims.claim(&id, ctx.claim_ttl).await {
