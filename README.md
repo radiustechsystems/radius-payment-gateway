@@ -1,4 +1,4 @@
-# radius-gateway
+# radius-payment-gateway
 
 A reverse proxy that enforces a [Radius Platform](https://platform-api.radiustech.xyz) compiled
 policy in front of an API. It sits behind your TLS terminator (nginx, Caddy) and in front of your
