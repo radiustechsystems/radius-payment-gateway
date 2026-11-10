@@ -14,7 +14,7 @@ use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use http::header::{CACHE_CONTROL, HOST};
-use http::{HeaderName, HeaderValue, Request, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use http_body_util::BodyExt;
 use policy::compiled::PaymentRequirement;
 use serde_json::Value;
@@ -510,7 +510,37 @@ where
     paid.headers_mut()
         .insert(PAYMENT_RESPONSE, encode(&settlement));
     strip_framing(paid.headers_mut());
+    keep_from_shared_caches(paid.headers_mut());
     (paid, ChargeOutcome::Paid)
+}
+
+/// Keeps shared caches from storing a paid response, which they could otherwise give another
+/// buyer without payment: `Cache-Control` gets `private`, and loses `public`, unless it already
+/// has `private` or `no-store`.
+fn keep_from_shared_caches(headers: &mut HeaderMap) {
+    let directives: Vec<String> = headers
+        .get_all(CACHE_CONTROL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|directive| directive.trim().to_owned())
+        .filter(|directive| !directive.is_empty())
+        .collect();
+    let is = |directive: &str, name: &str| directive.eq_ignore_ascii_case(name);
+    if directives
+        .iter()
+        .any(|directive| is(directive, "private") || is(directive, "no-store"))
+    {
+        return;
+    }
+    let kept = directives
+        .iter()
+        .map(String::as_str)
+        .filter(|directive| !is(directive, "public"));
+    let value = std::iter::once("private").chain(kept).collect::<Vec<_>>();
+    if let Ok(value) = HeaderValue::from_str(&value.join(", ")) {
+        headers.insert(CACHE_CONTROL, value);
+    }
 }
 
 /// The resource a payment names when it isn't `resource_url`, the one this request's challenge

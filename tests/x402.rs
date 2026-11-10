@@ -921,7 +921,6 @@ async fn a_disconnect_during_settlement_keeps_the_payment() {
 }
 
 #[tokio::test]
-#[ignore = "passes the upstream's Cache-Control through on a paid response, or sets none"]
 async fn shared_caches_dont_store_paid_responses() {
     let world = World::start().await;
     world.verify_answers(200, json!({ "isValid": true })).await;

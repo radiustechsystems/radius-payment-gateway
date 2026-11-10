@@ -34,7 +34,10 @@ decisions are the reference implementation. Accepted policy formats: `radius.pol
    before `/settle` is called (an upstream error, a buyer that disconnects) can be tried again.
    A payment that names a `resource.url` must name this request's, the URL its challenge gives,
    compared as URLs (scheme and host in any case, a default port or not); the field isn't
-   signed, so this only catches a payment sent to the wrong route.
+   signed, so this only catches a payment sent to the wrong route. A paid response carries
+   `Cache-Control: private` (replacing a `public`) unless the upstream's already says `private`
+   or `no-store`, so a shared cache can't give it to another buyer; challenges and the
+   `settlement_unknown` answer carry `no-store`.
 
 The challenge offers every payment option of the rule as the policy compiled it (network, token,
 amount, recipient). What a buyer has to sign for a token (its transfer method and EIP-712 domain)
