@@ -119,7 +119,7 @@ impl Gate {
                 };
                 let context = ChargeContext {
                     facilitator: &self.facilitator,
-                    claims: self.claims.as_ref(),
+                    claims: &self.claims,
                     claim_ttl: self.payments.claim_ttl,
                     paid_body_limit: self.payments.paid_body_limit,
                     upstream_timeout: self.upstream.timeout(),

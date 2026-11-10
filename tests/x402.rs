@@ -855,7 +855,6 @@ async fn a_failed_paid_body_releases_the_payment() {
 }
 
 #[tokio::test]
-#[ignore = "a buyer that disconnects before settlement leaves its payment claimed for CLAIM_TTL"]
 async fn a_disconnect_before_settlement_releases_the_payment() {
     let world = World::start().await;
     Mock::given(method("POST"))
@@ -891,7 +890,6 @@ async fn a_disconnect_before_settlement_releases_the_payment() {
 }
 
 #[tokio::test]
-#[ignore = "a buyer that disconnects during /settle is later told to sign a new payment"]
 async fn a_disconnect_during_settlement_keeps_the_payment() {
     let world = World::start().await;
     world.verify_answers(200, json!({ "isValid": true })).await;

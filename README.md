@@ -30,10 +30,11 @@ decisions are the reference implementation. Accepted policy formats: `radius.pol
 4. `charge`: answers `402` with a `PAYMENT-REQUIRED` challenge. A retry carrying
    `PAYMENT-SIGNATURE` is matched against the offer, claimed against replay, verified with the
    option's facilitator, forwarded, and settled after a 2xx. The response carries
-   `PAYMENT-RESPONSE`. An upstream error is never charged. A payment that names a
-   `resource.url` must name this request's, the URL its challenge gives, compared as URLs
-   (scheme and host in any case, a default port or not); the field isn't signed, so this only
-   catches a payment sent to the wrong route.
+   `PAYMENT-RESPONSE`. An upstream error is never charged, and a payment whose request ends
+   before `/settle` is called (an upstream error, a buyer that disconnects) can be tried again.
+   A payment that names a `resource.url` must name this request's, the URL its challenge gives,
+   compared as URLs (scheme and host in any case, a default port or not); the field isn't
+   signed, so this only catches a payment sent to the wrong route.
 
 The challenge offers every payment option of the rule as the policy compiled it (network, token,
 amount, recipient). What a buyer has to sign for a token (its transfer method and EIP-712 domain)

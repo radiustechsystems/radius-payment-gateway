@@ -7,6 +7,7 @@ pub mod facilitator;
 pub mod supported;
 pub mod types;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -43,7 +44,7 @@ pub struct Charge<'a> {
 /// What the gate gives the charge flow.
 pub struct ChargeContext<'a> {
     pub facilitator: &'a FacilitatorClient,
-    pub claims: &'a dyn ClaimGuard,
+    pub claims: &'a Arc<dyn ClaimGuard>,
     pub claim_ttl: Duration,
     pub paid_body_limit: usize,
     /// The upstream's timeout, which also bounds the read of a paid body before settlement.
@@ -288,51 +289,125 @@ where
         Err(error) => return claim_failed(error),
     }
 
-    let (response, outcome, keep_claim) = claimed(
+    let mut held = Held {
+        claims: ctx.claims.clone(),
+        id,
+        stage: Stage::Unused,
+    };
+    let (response, outcome) = claimed(
         ctx,
         requirements,
         &facilitator,
         &payload,
         &offered,
+        &mut held,
         request,
         forward,
     )
     .await;
-    if !keep_claim && let Err(error) = ctx.claims.release(&id).await {
-        tracing::error!(error = %error, "payment release failed");
-    }
-    if outcome == ChargeOutcome::Unknown {
-        let payment_response = response
+    let unknown = (outcome == ChargeOutcome::Unknown).then(|| UnknownSettlement {
+        payment_response: response
             .headers()
             .get(PAYMENT_RESPONSE)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let unknown = UnknownSettlement { payment_response };
-        if let Err(error) = ctx.claims.mark_unknown(&id, unknown).await {
-            tracing::error!(error = %error, "payment mark failed");
-        }
-    }
+            .map(str::to_owned),
+    });
+    held.end(unknown).await;
     (response, outcome)
 }
 
-/// The flow once the payment is claimed. Returns whether the claim stays: it does once `/settle`
-/// has been called, whatever the facilitator answered, since the transfer may have been broadcast.
+/// A claimed payment while its request is handled. Until `/settle` is called the payment is
+/// unused, so the claim is released when the request ends, also when it ends because the buyer
+/// disconnected and the server dropped the request's future. Once `/settle` is called the claim
+/// stays whatever the facilitator answers, since the transfer may have been broadcast, and an
+/// outcome that is unknown, including one never read because the request was dropped, is
+/// recorded.
+struct Held {
+    claims: Arc<dyn ClaimGuard>,
+    id: String,
+    stage: Stage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Unused,
+    Settling,
+    Ended,
+}
+
+impl Held {
+    /// Called before `/settle`: from here the claim stays.
+    fn settling(&mut self) {
+        self.stage = Stage::Settling;
+    }
+
+    /// Ends the hold for a request that was answered, with its settlement when that is unknown.
+    async fn end(mut self, unknown: Option<UnknownSettlement>) {
+        if self.stage == Stage::Unused {
+            if let Err(error) = self.claims.release(&self.id).await {
+                tracing::error!(error = %error, "payment release failed");
+            }
+        } else if let Some(unknown) = unknown
+            && let Err(error) = self.claims.mark_unknown(&self.id, unknown).await
+        {
+            tracing::error!(error = %error, "payment mark failed");
+        }
+        self.stage = Stage::Ended;
+    }
+}
+
+impl Drop for Held {
+    /// A request dropped before it ended: releases an unused payment, or records a settlement
+    /// whose answer was never read as unknown. Neither can be awaited here, so it's spawned.
+    fn drop(&mut self) {
+        let stage = self.stage;
+        if stage == Stage::Ended {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let claims = self.claims.clone();
+        let id = std::mem::take(&mut self.id);
+        tracing::debug!(
+            ?stage,
+            "the request was dropped while its payment was claimed"
+        );
+        runtime.spawn(async move {
+            let result = if stage == Stage::Unused {
+                claims.release(&id).await
+            } else {
+                let unknown = UnknownSettlement {
+                    payment_response: None,
+                };
+                claims.mark_unknown(&id, unknown).await
+            };
+            if let Err(error) = result {
+                tracing::error!(error = %error, "payment release or mark failed");
+            }
+        });
+    }
+}
+
+/// The flow once the payment is claimed. Calls `held.settling()` before `/settle`.
+#[allow(clippy::too_many_arguments)]
 async fn claimed<F, Fut>(
     ctx: &ChargeContext<'_>,
     requirements: PaymentRequired,
     facilitator: &str,
     payload: &Value,
     offered: &PaymentRequirements,
+    held: &mut Held,
     request: Request<Body>,
     forward: F,
-) -> (Response, ChargeOutcome, bool)
+) -> (Response, ChargeOutcome)
 where
     F: FnOnce(Request<Body>) -> Fut,
     Fut: Future<Output = Response>,
 {
     let verification = match ctx.facilitator.verify(facilitator, payload, offered).await {
         Ok(verification) => verification,
-        Err(error) => return (facilitator_failed(error), ChargeOutcome::Unavailable, false),
+        Err(error) => return (facilitator_failed(error), ChargeOutcome::Unavailable),
     };
     if !verification.is_valid {
         let reason = verification
@@ -343,13 +418,12 @@ where
         return (
             payment_required_response(requirements, reason),
             ChargeOutcome::Challenged,
-            false,
         );
     }
 
     let response = forward(request).await;
     if !response.status().is_success() {
-        return (response, ChargeOutcome::UpstreamFailed, false);
+        return (response, ChargeOutcome::UpstreamFailed);
     }
 
     // A body that fails or doesn't arrive in time is an upstream failure like any other:
@@ -367,12 +441,11 @@ where
                     "the upstream's response failed",
                 ),
                 ChargeOutcome::UpstreamFailed,
-                false,
             );
         }
         Err(_) => {
             let error = UpstreamError::Timeout(ctx.upstream_timeout);
-            return (upstream_failed(error), ChargeOutcome::UpstreamFailed, false);
+            return (upstream_failed(error), ChargeOutcome::UpstreamFailed);
         }
     };
 
@@ -380,11 +453,12 @@ where
     // broadcast the transfer before something failed (a timeout, a lost connection, a failed
     // receipt wait it reports as `settlement_pending`), and the transfer can still land. Only a
     // refusal asks the buyer for a new payment; any other failure is answered as unknown.
+    held.settling();
     let settlement = match ctx.facilitator.settle(facilitator, payload, offered).await {
         Ok(settlement) => settlement,
         Err(error) => {
             tracing::error!(error = %error, network = offered.network, "settlement outcome unknown");
-            return (settlement_unknown(None), ChargeOutcome::Unknown, true);
+            return (settlement_unknown(None), ChargeOutcome::Unknown);
         }
     };
     if !settlement.success {
@@ -405,7 +479,6 @@ where
             return (
                 settlement_unknown(header.as_deref()),
                 ChargeOutcome::Unknown,
-                true,
             );
         }
         if settlement.transaction.is_empty() {
@@ -424,7 +497,7 @@ where
         failed
             .headers_mut()
             .insert(PAYMENT_RESPONSE, encode(&settlement));
-        return (failed, ChargeOutcome::Challenged, true);
+        return (failed, ChargeOutcome::Challenged);
     }
     tracing::info!(
         transaction = settlement.transaction,
@@ -437,7 +510,7 @@ where
     paid.headers_mut()
         .insert(PAYMENT_RESPONSE, encode(&settlement));
     strip_framing(paid.headers_mut());
-    (paid, ChargeOutcome::Paid, true)
+    (paid, ChargeOutcome::Paid)
 }
 
 /// The resource a payment names when it isn't `resource_url`, the one this request's challenge
