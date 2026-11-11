@@ -43,12 +43,55 @@ fn help_lists_every_setting_with_its_environment_variable() {
         ("--facilitator-timeout", "FACILITATOR_TIMEOUT"),
         ("--paid-body-limit", "PAID_BODY_LIMIT"),
         ("--claim-ttl", "CLAIM_TTL"),
+        ("--pages-dir", "PAGES_DIR"),
+        ("--brand", "BRAND"),
+        ("--brand-url", "BRAND_URL"),
         ("--log-filter", "RUST_LOG"),
         ("--log-format", "LOG_FORMAT"),
     ] {
         assert!(help.contains(flag), "missing {flag}");
         assert!(help.contains(&format!("[env: {env}")), "missing {env}");
     }
+}
+
+#[test]
+fn export_pages_writes_the_defaults_and_exits() {
+    let dir = std::env::temp_dir().join(format!("radius-gateway-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let output = gateway(&["--export-pages", dir.to_str().unwrap()], &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("wrote 3 files"));
+    for file in ["402.html", "assets/style.css", "assets/pay.js"] {
+        assert!(dir.join(file).is_file(), "missing {file}");
+    }
+    assert!(stdout(&gateway(&["--help"], &[])).contains("--export-pages"));
+    // A second export refuses to overwrite.
+    let again = gateway(&["--export-pages", dir.to_str().unwrap()], &[]);
+    assert!(!again.status.success());
+    assert!(stderr(&again).contains("not overwriting"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_missing_pages_dir_fails_at_startup() {
+    let output = gateway(
+        &["--pages-dir", "/nonexistent/radius-gateway-pages"],
+        &[
+            ("UPSTREAM", "http://127.0.0.1:1"),
+            ("PLATFORM_API_KEY", "sk_test"),
+            ("ORGANIZATION_ID", "org_1"),
+            ("PROJECT_ID", "01a1c14b-cc9f-7033-92d3-bd51d003d97e"),
+            ("STARTUP_POLICY_WAIT", "0s"),
+            ("LISTEN", "127.0.0.1:0"),
+            ("ADMIN_LISTEN", "127.0.0.1:0"),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("not a directory"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

@@ -120,6 +120,15 @@ async fn broken() -> Response {
 
 /// Starts the echo upstream on a free port.
 pub async fn spawn_upstream() -> SocketAddr {
+    let (addr, stop) = spawn_upstream_stoppable().await;
+    // Dropping the handle would stop the server; it lives for the rest of the test process.
+    std::mem::forget(stop);
+    addr
+}
+
+/// Starts the echo upstream on a free port, with a handle that shuts it down.
+pub async fn spawn_upstream_stoppable() -> (SocketAddr, oneshot::Sender<()>) {
+    let (stop, stopped) = oneshot::channel::<()>();
     let router = Router::new()
         .route("/stream", get(slow_stream))
         .route("/status/{code}", any(status))
@@ -130,8 +139,15 @@ pub async fn spawn_upstream() -> SocketAddr {
         .fallback(echo);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    addr
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap()
+    });
+    (addr, stop)
 }
 
 /// The gateway, serving in this process.

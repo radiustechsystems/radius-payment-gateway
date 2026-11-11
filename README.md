@@ -49,6 +49,55 @@ with the `eip2612GasSponsoring` extension declared when the facilitator sponsors
 When a facilitator can't be read, SBC on Radius still gets its EIP-3009 offer from a built-in
 table; other tokens get an empty `extra`, which buyers can't sign.
 
+## The payment page
+
+A browser that opens a paid URL gets a page instead of JSON: what the request costs, in which
+token and on which network, who is paid, and three ways to pay. **Connect wallet** signs the
+payment with an injected wallet (MetaMask or any EIP-1193 wallet; the wallet is asked to switch
+to, or add, the Radius network), sends it, and reloads the page once the gateway has settled
+it. Below it, collapsed, are the `radius-cli` command for a terminal and the raw challenge for
+a program. Agents, SDKs and `radius-cli` never see the page: the body is HTML only when the
+request's `Accept` prefers `text/html` over `application/json`, and the `PAYMENT-REQUIRED`
+header is the same either way.
+
+The reload is delivered through a **ticket**: when a payment sent from the page settles, the
+paid response carries a `radius_ticket` cookie (single use, bound to the exact method and URL,
+60 seconds, `HttpOnly`, `SameSite=Strict`, `Secure` over https). The reload presents it, the
+gateway strips it, forwards the request once without charging or counting it, and clears the
+cookie. A reload the upstream fails to answer keeps the ticket; a ticket used, expired, or
+presented for another URL falls back to the normal policy answer. The upstream therefore sees
+two GETs for a browser purchase: the paid one, whose body the browser discards and which carries
+`Radius-Page: 1`, and the reload. The page pays EIP-3009 offers; a token offered only through
+Permit2 can still be paid from the terminal.
+
+### Customizing the page
+
+The page and its assets are files inside the binary. To change them, export them and point the
+gateway at the directory:
+
+```sh
+radius-gateway --export-pages ./pages
+# edit pages/402.html, pages/assets/style.css, pages/assets/pay.js, add images under assets/
+radius-gateway --pages-dir ./pages …
+```
+
+Files in the directory replace the built-in ones by name; the rest stay built in. `402.html`
+is a template with `{{placeholders}}`, every one escaped for HTML: `brand`, `brand_url`,
+`brand_html` (the brand line, ready to drop in), `price` (`0.01 SBC`), `amount` (`0.01`),
+`asset_symbol`, `description` (the rule's), `resource_url`, `network_name`, `pay_to`, `error`
+(empty on a plain challenge; the facilitator's reason after a refused payment), `cli_command`,
+`challenge_json` (for the `<script type="application/json" id="x402-challenge">` block the
+script reads), and `assets_base` (where `assets/` is served). Everything under `assets/` is
+served at `/_radius/assets/` with an `ETag` and a five-minute cache lifetime, before the policy
+sees the request, so a catch-all `charge` rule never charges the page's own files. The prefix is
+reserved: an upstream route under `/_radius/` can't be reached through the gateway. The page is
+served with a Content Security Policy that only allows scripts and styles from `/_radius/assets/`,
+so keep them there rather than inline. `--brand` and `--brand-url` put a name at the top of the
+default page.
+
+`node --test pages/assets/pay.test.mjs` checks the script's pure parts; the wallet flow itself
+is tested by hand with MetaMask on Radius testnet.
+
 Error responses are JSON `{"code": "…", "message": "…"}`:
 
 | Situation | Status | `code` |
@@ -87,6 +136,10 @@ Every setting is a flag or an environment variable; flags win.
 | `--facilitator-timeout` | `FACILITATOR_TIMEOUT` | `20s` | Per `/verify` or `/settle` call |
 | `--paid-body-limit` | `PAID_BODY_LIMIT` | `10485760` | Bytes of a paid response buffered before settling; larger responses settle on status and stream |
 | `--claim-ttl` | `CLAIM_TTL` | `24h` | How long a used payment stays claimed |
+| `--pages-dir` | `PAGES_DIR` | | A directory of page files overriding the built-in ones (see "Customizing the page") |
+| `--export-pages` | | | Write the built-in page files to a directory and exit |
+| `--brand` | `BRAND` | | A name shown at the top of the payment page |
+| `--brand-url` | `BRAND_URL` | | Where the brand name links to |
 | `--log-filter` | `RUST_LOG` | `info,radius_gateway=debug` | |
 | `--log-format` | `LOG_FORMAT` | `text` | `text` or `json` |
 
@@ -137,6 +190,8 @@ are never logged.
 - **Counters and claims are per instance.** Rate limits, free quotas and the payment replay
   guard live in the process's memory. With two replicas, a limit applies twice and a payment could
   be replayed once per replica. Run one replica until a shared store (Redis) is added.
+- Tickets live with the counters, per instance: a reload that lands on another replica pays
+  again.
 - WebSockets and other upgrades aren't proxied.
 - `OPTIONS` goes through the policy like any method; a catch-all `charge` rule charges it. Add an
   `allow` rule for preflight routes if browsers call the API directly.

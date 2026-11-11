@@ -31,6 +31,25 @@ pub struct UnknownSettlement {
     pub payment_response: Option<String>,
 }
 
+/// What a ticket delivers: one request, by method and exact URL, under the rule that charged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ticket {
+    /// `GET`; HEAD is delivered as GET.
+    pub method: String,
+    pub path_and_query: String,
+    pub rule: Option<String>,
+}
+
+/// Where tickets live until they're redeemed or expire.
+#[async_trait]
+pub trait TicketStore: Send + Sync {
+    async fn issue(&self, id: &str, ticket: Ticket, ttl: Duration) -> Result<(), ClaimError>;
+    /// The ticket, if it exists and hasn't expired, left in place.
+    async fn peek(&self, id: &str) -> Result<Option<Ticket>, ClaimError>;
+    /// Removes and returns the ticket: single use.
+    async fn redeem(&self, id: &str) -> Result<Option<Ticket>, ClaimError>;
+}
+
 #[async_trait]
 pub trait ClaimGuard: Send + Sync {
     /// Claims `id` for `ttl`. False when it's already claimed.

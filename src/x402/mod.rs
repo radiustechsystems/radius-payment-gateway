@@ -10,19 +10,23 @@ pub mod types;
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy_primitives::U256;
 use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
+use domain::pricing::catalog;
 use futures_util::StreamExt;
-use http::header::{CACHE_CONTROL, HOST};
+use http::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HOST, VARY};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use http_body_util::BodyExt;
 use policy::compiled::PaymentRequirement;
 use serde_json::Value;
 
-use crate::counters::{ClaimGuard, UnknownSettlement};
+use crate::counters::{ClaimGuard, Ticket, TicketStore, UnknownSettlement};
 use crate::error::{error_response, uncacheable_error};
 use crate::gate::upstream_failed;
+use crate::pages::{PageVars, Pages, negotiate};
 use crate::proxy::{UpstreamError, strip_framing};
+use crate::ticket;
 pub use facilitator::FacilitatorClient;
 pub use types::{PaymentRequired, PaymentRequirements, ResourceInfo, SettleResponse};
 
@@ -35,11 +39,22 @@ pub const PAYMENT_RESPONSE: HeaderName = HeaderName::from_static("payment-respon
 
 pub const X402_VERSION: u8 = 2;
 
+/// The challenge's `error` when no payment was presented: the page shows nothing for it.
+pub const NO_PAYMENT: &str = "PAYMENT-SIGNATURE header is required";
+
+/// What a browser's page may load, so a custom template can't be turned into a script injection
+/// by what the request controls: scripts and styles only from the gateway's own assets.
+const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'";
+
 /// A `charge` decision: what the policy wants paid.
 pub struct Charge<'a> {
+    pub rule: Option<&'a str>,
     pub description: &'a str,
     pub accepts: &'a [PaymentRequirement],
 }
+
+/// The page marks the paid request it sends, so a settled payment gets a ticket for the reload.
+pub const PAGE_MARKER: HeaderName = HeaderName::from_static("radius-page");
 
 /// What the gate gives the charge flow.
 pub struct ChargeContext<'a> {
@@ -51,6 +66,11 @@ pub struct ChargeContext<'a> {
     pub upstream_timeout: Duration,
     pub max_timeout_seconds: u32,
     pub public_url: Option<&'a str>,
+    pub pages: &'a Pages,
+    pub brand: Option<&'a str>,
+    pub brand_url: Option<&'a str>,
+    pub tickets: &'a Arc<dyn TicketStore>,
+    pub ticket_ttl: Duration,
 }
 
 /// How a charge ended, for telemetry.
@@ -81,6 +101,20 @@ impl ChargeOutcome {
             Self::Unknown => "settlement_unknown",
         }
     }
+}
+
+/// Whether buyers reach the gateway over https: by `public_url`, else by what the proxy in
+/// front of us forwarded. Decides the `Secure` flag of the page's cookies.
+pub fn public_https(request: &Request<Body>, public_url: Option<&str>) -> bool {
+    if let Some(base) = public_url {
+        return base.starts_with("https://");
+    }
+    request
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
 }
 
 /// The URL buyers called, for `resource.url`: the request's path and query under `public_url`,
@@ -159,8 +193,8 @@ pub async fn challenge(
     }
 }
 
-/// A 402 with the requirements in the `PAYMENT-REQUIRED` header and as the body. A challenge is
-/// for this request only, so caches must not answer another with it.
+/// A 402 with the requirements in the `PAYMENT-REQUIRED` header and as the JSON body. A
+/// challenge is for this request only, so caches must not answer another with it.
 pub fn payment_required_response(mut requirements: PaymentRequired, error: &str) -> Response {
     requirements.error = Some(error.to_owned());
     let encoded = encode(&requirements);
@@ -168,7 +202,214 @@ pub fn payment_required_response(mut requirements: PaymentRequired, error: &str)
     let headers = response.headers_mut();
     headers.insert(PAYMENT_REQUIRED, encoded);
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(VARY, HeaderValue::from_static("Accept"));
     response
+}
+
+/// Answers a 402 the way the client asked for it: the page for a browser, JSON for everyone
+/// else. Built while the request is still at hand, since the challenge may be answered after the
+/// request has gone upstream.
+pub struct Challenger<'a> {
+    pages: &'a Pages,
+    html: bool,
+    vars: PageVars,
+    /// The ticket to issue if this request settles: only a GET from the page.
+    ticket: Option<TicketRequest>,
+}
+
+struct TicketRequest {
+    ticket: Ticket,
+    cookie_path: String,
+    secure: bool,
+}
+
+impl<'a> Challenger<'a> {
+    fn new(
+        ctx: &ChargeContext<'a>,
+        charge: &Charge<'_>,
+        requirements: &PaymentRequired,
+        request: &Request<Body>,
+    ) -> Self {
+        let html = negotiate::prefers_html(
+            request
+                .headers()
+                .get(ACCEPT)
+                .and_then(|value| value.to_str().ok()),
+        );
+        let from_page = request
+            .headers()
+            .get(PAGE_MARKER)
+            .is_some_and(|value| value == "1");
+        let method = ticket::normalized_method(request.method());
+        let ticket = (from_page && method == "GET").then(|| TicketRequest {
+            ticket: Ticket {
+                method: method.to_owned(),
+                path_and_query: request
+                    .uri()
+                    .path_and_query()
+                    .map_or("/", |pq| pq.as_str())
+                    .to_owned(),
+                rule: charge.rule.map(str::to_owned),
+            },
+            cookie_path: ticket::cookie_path(request.uri().path()).to_owned(),
+            secure: requirements.resource.url.starts_with("https://"),
+        });
+        Self {
+            pages: ctx.pages,
+            html,
+            vars: page_vars(ctx, charge, requirements),
+            ticket,
+        }
+    }
+
+    /// Gives the paid response a ticket for the reload that delivers the purchase, when the
+    /// request came from the page.
+    async fn issue_ticket(&self, ctx: &ChargeContext<'_>, response: &mut Response) {
+        let Some(wanted) = &self.ticket else { return };
+        let id = ticket::new_id();
+        match ctx
+            .tickets
+            .issue(&id, wanted.ticket.clone(), ctx.ticket_ttl)
+            .await
+        {
+            Ok(()) => {
+                response.headers_mut().append(
+                    http::header::SET_COOKIE,
+                    ticket::set_cookie(&id, &wanted.cookie_path, ctx.ticket_ttl, wanted.secure),
+                );
+                tracing::debug!("ticket issued for the page's reload");
+            }
+            Err(error) => tracing::error!(error = %error, "ticket couldn't be issued"),
+        }
+    }
+
+    pub fn respond(&self, requirements: PaymentRequired, error: &str) -> Response {
+        if !self.html {
+            return payment_required_response(requirements, error);
+        }
+        let mut requirements = requirements;
+        requirements.error = Some(error.to_owned());
+        let encoded = encode(&requirements);
+        let vars = PageVars {
+            error: if error == NO_PAYMENT {
+                String::new()
+            } else {
+                error.to_owned()
+            },
+            challenge_json: serde_json::to_string(&requirements).expect("the challenge serializes"),
+            ..self.vars.clone()
+        };
+        let html = self.pages.render_402(&vars);
+        let mut response = (StatusCode::PAYMENT_REQUIRED, html).into_response();
+        let headers = response.headers_mut();
+        headers.insert(PAYMENT_REQUIRED, encoded);
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(VARY, HeaderValue::from_static("Accept"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static(PAGE_CSP),
+        );
+        headers.insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
+        response
+    }
+}
+
+/// What the page says about the charge, from the option a browser can pay (the first EIP-3009
+/// `exact` option on an EVM network, else the first) and the gateway's branding.
+fn page_vars(
+    ctx: &ChargeContext<'_>,
+    charge: &Charge<'_>,
+    requirements: &PaymentRequired,
+) -> PageVars {
+    let index = payable_index(&requirements.accepts).unwrap_or(0);
+    let compiled = charge.accepts.get(index);
+    let offered = requirements.accepts.get(index);
+    let network = compiled.map(|c| c.network.as_str()).unwrap_or_default();
+    let known = catalog::network(network);
+    let amount = compiled
+        .map(|c| format_units(c.amount, c.decimals))
+        .unwrap_or_default();
+    let asset_symbol = compiled
+        .and_then(|c| known.and_then(|net| catalog::asset(net, c.asset)))
+        .map(|asset| asset.symbol.to_owned())
+        .or_else(|| {
+            offered
+                .and_then(|o| o.extra.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| compiled.map(|c| shorten(&c.asset.to_string())))
+        .unwrap_or_default();
+    PageVars {
+        brand: ctx.brand.map(str::to_owned),
+        brand_url: ctx.brand_url.map(str::to_owned),
+        price: format!("{amount} {asset_symbol}").trim().to_owned(),
+        cli_command: cli_command(&requirements.resource.url, &amount),
+        amount,
+        asset_symbol,
+        description: charge.description.to_owned(),
+        resource_url: requirements.resource.url.clone(),
+        network_name: known
+            .map(|net| net.label.to_owned())
+            .unwrap_or_else(|| network.to_owned()),
+        pay_to: compiled.map(|c| c.pay_to.to_string()).unwrap_or_default(),
+        error: String::new(),
+        challenge_json: String::new(),
+    }
+}
+
+/// The first option the page can pay: `exact` on an EVM network through EIP-3009, the transfer
+/// method a wallet signs in one step. (Permit2 needs an allowance and a second signature, which
+/// the page doesn't do yet.)
+pub fn payable_index(accepts: &[PaymentRequirements]) -> Option<usize> {
+    accepts.iter().position(|offer| {
+        let method = offer
+            .extra
+            .get("assetTransferMethod")
+            .and_then(Value::as_str)
+            .unwrap_or("eip3009");
+        offer.scheme == "exact" && offer.network.starts_with("eip155:") && method == "eip3009"
+    })
+}
+
+/// `amount` in the token's units with `decimals` places, trailing zeros dropped: 10000 with 6
+/// decimals is `0.01`.
+pub fn format_units(amount: U256, decimals: u8) -> String {
+    let digits = amount.to_string();
+    let decimals = usize::from(decimals);
+    if decimals == 0 {
+        return digits;
+    }
+    let padded = format!("{digits:0>width$}", width = decimals + 1);
+    let (whole, fraction) = padded.split_at(padded.len() - decimals);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        whole.to_owned()
+    } else {
+        format!("{whole}.{fraction}")
+    }
+}
+
+/// The radius-cli command that pays for `url`, with the URL single-quoted for a POSIX shell.
+pub fn cli_command(url: &str, amount: &str) -> String {
+    let quoted = url.replace('\'', "'\\''");
+    format!("radius-cli wallet pay get '{quoted}' --threshold {amount} -y")
+}
+
+/// `0x4373…Fe6e` for an address.
+fn shorten(address: &str) -> String {
+    if address.len() > 12 {
+        format!("{}…{}", &address[..6], &address[address.len() - 4..])
+    } else {
+        address.to_owned()
+    }
 }
 
 fn encode<T: serde::Serialize>(value: &T) -> HeaderValue {
@@ -200,6 +441,7 @@ where
         ctx.max_timeout_seconds,
     )
     .await;
+    let challenger = Challenger::new(ctx, charge, &requirements, &request);
     let Some(signature) = request
         .headers()
         .get(PAYMENT_SIGNATURE)
@@ -207,7 +449,7 @@ where
         .map(str::to_owned)
     else {
         return (
-            payment_required_response(requirements, "PAYMENT-SIGNATURE header is required"),
+            challenger.respond(requirements, NO_PAYMENT),
             ChargeOutcome::Challenged,
         );
     };
@@ -231,7 +473,7 @@ where
     };
     if payload.get("x402Version").and_then(Value::as_u64) != Some(u64::from(X402_VERSION)) {
         return (
-            payment_required_response(
+            challenger.respond(
                 requirements,
                 &format!("x402 version {X402_VERSION} is required"),
             ),
@@ -241,7 +483,7 @@ where
     if let Some(other) = other_resource(&payload, &requirements.resource.url) {
         let error = format!("the payment is for {other}, not this resource");
         return (
-            payment_required_response(requirements, &error),
+            challenger.respond(requirements, &error),
             ChargeOutcome::Challenged,
         );
     }
@@ -252,7 +494,7 @@ where
         .position(|offered| offered.matches(accepted))
     else {
         return (
-            payment_required_response(
+            challenger.respond(
                 requirements,
                 "the payment doesn't match an accepted requirement",
             ),
@@ -269,7 +511,7 @@ where
     if let Some((field, offered_field)) = offered.signed_mismatch(&payload) {
         let error = format!("the signed {field} doesn't match the offered {offered_field}");
         return (
-            payment_required_response(requirements, &error),
+            challenger.respond(requirements, &error),
             ChargeOutcome::Challenged,
         );
     }
@@ -286,7 +528,7 @@ where
                     ChargeOutcome::Unknown,
                 ),
                 Ok(None) => (
-                    payment_required_response(
+                    challenger.respond(
                         requirements,
                         "this payment has already been used; sign a new one",
                     ),
@@ -305,6 +547,7 @@ where
     };
     let (response, outcome) = claimed(
         ctx,
+        &challenger,
         requirements,
         &facilitator,
         &payload,
@@ -402,6 +645,7 @@ impl Drop for Held {
 #[allow(clippy::too_many_arguments)]
 async fn claimed<F, Fut>(
     ctx: &ChargeContext<'_>,
+    challenger: &Challenger<'_>,
     requirements: PaymentRequired,
     facilitator: &str,
     payload: &Value,
@@ -425,7 +669,7 @@ where
             .unwrap_or("the payment is invalid");
         tracing::debug!(reason, "payment didn't verify");
         return (
-            payment_required_response(requirements, reason),
+            challenger.respond(requirements, reason),
             ChargeOutcome::Challenged,
         );
     }
@@ -501,8 +745,7 @@ where
                 "settlement failed after a transaction"
             );
         }
-        let mut failed =
-            payment_required_response(requirements, &format!("settlement failed: {reason}"));
+        let mut failed = challenger.respond(requirements, &format!("settlement failed: {reason}"));
         failed
             .headers_mut()
             .insert(PAYMENT_RESPONSE, encode(&settlement));
@@ -520,6 +763,7 @@ where
         .insert(PAYMENT_RESPONSE, encode(&settlement));
     strip_framing(paid.headers_mut());
     keep_from_shared_caches(paid.headers_mut());
+    challenger.issue_ticket(ctx, &mut paid).await;
     (paid, ChargeOutcome::Paid)
 }
 
@@ -666,6 +910,42 @@ mod tests {
             "https://example.com/api/tx/1?x=1"
         );
         assert_eq!(resource_url(&req, None), "http://gw.internal:8080/tx/1?x=1");
+    }
+
+    #[test]
+    fn formats_units_and_the_cli_command() {
+        assert_eq!(format_units(U256::from(10000u64), 6), "0.01");
+        assert_eq!(format_units(U256::from(1_000_000u64), 6), "1");
+        assert_eq!(format_units(U256::from(1_234_567u64), 6), "1.234567");
+        assert_eq!(format_units(U256::from(5u64), 0), "5");
+        assert_eq!(format_units(U256::ZERO, 6), "0");
+        assert_eq!(
+            cli_command("https://a.example/x?it's", "0.01"),
+            "radius-cli wallet pay get 'https://a.example/x?it'\\''s' --threshold 0.01 -y"
+        );
+    }
+
+    #[test]
+    fn picks_the_option_a_wallet_can_sign() {
+        let option = |method: Option<&str>, network: &str| PaymentRequirements {
+            scheme: "exact".into(),
+            network: network.into(),
+            amount: "1".into(),
+            asset: "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb".into(),
+            pay_to: "0x4373dD700774F8C3f649AC58B7EDCC112785Fe6e".into(),
+            max_timeout_seconds: 60,
+            extra: match method {
+                Some(m) => serde_json::json!({ "assetTransferMethod": m }),
+                None => serde_json::json!({}),
+            },
+        };
+        let accepts = [
+            option(Some("permit2"), "eip155:72344"),
+            option(None, "solana:x"),
+            option(None, "eip155:72344"),
+        ];
+        assert_eq!(payable_index(&accepts), Some(2));
+        assert_eq!(payable_index(&accepts[..2]), None);
     }
 
     #[test]

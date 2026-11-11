@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Payment required</title>
+<link rel="stylesheet" href="{{assets_base}}/style.css">
+</head>
+<body>
+<main class="card">
+  {{brand_html}}
+  <h1>Payment required</h1>
+  <p class="description">{{description}}</p>
+
+  <dl class="terms">
+    <div><dt>Price</dt><dd class="price">{{price}}</dd></div>
+    <div><dt>Network</dt><dd>{{network_name}}</dd></div>
+    <div><dt>To</dt><dd><code class="address" title="{{pay_to}}">{{pay_to}}</code></dd></div>
+    <div><dt>For</dt><dd class="url" title="{{resource_url}}">{{resource_url}}</dd></div>
+  </dl>
+
+  <button id="pay" class="primary" type="button">Connect wallet and pay {{price}}</button>
+  <p id="status" class="status" aria-live="polite">{{error}}</p>
+  <p class="note">One payment, one request. Nothing is stored.</p>
+
+  <details class="option">
+    <summary>Pay from a terminal</summary>
+    <p>With <a href="https://docs.radiustech.xyz/reference/radius-cli" rel="noopener">radius-cli</a> and a funded wallet:</p>
+    <div class="command">
+      <pre><code id="cli">{{cli_command}}</code></pre>
+      <button id="copy" class="secondary" type="button">Copy</button>
+    </div>
+  </details>
+
+  <details class="option">
+    <summary>Pay programmatically</summary>
+    <p>This is an <a href="https://docs.radiustech.xyz/developer-resources/x402-integration" rel="noopener">x402</a> challenge. The same terms are in this response's <code>PAYMENT-REQUIRED</code> header, base64-encoded.</p>
+    <pre class="challenge"><code id="challenge"></code></pre>
+  </details>
+</main>
+<script type="application/json" id="x402-challenge">{{challenge_json}}</script>
+<script src="{{assets_base}}/pay.js"></script>
+</body>
+</html>
