@@ -49,6 +49,7 @@ pub const PLACEHOLDERS: &[&str] = &[
     "options_html",
     "page_json",
     "assets_base",
+    "build",
 ];
 
 /// One way to pay, as the page lists it.
@@ -219,6 +220,7 @@ impl Pages {
             Value::Raw(template::escape_json_script(&vars.page_json)),
         );
         map.insert("assets_base", text(&self.assets_base));
+        map.insert("build", text(crate::build::ID));
         template::render(&self.template, &map)
     }
 

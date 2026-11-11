@@ -2,6 +2,7 @@
 //! an API. See the README for how it's deployed and `docs/gates/standard.md` in radius-platform
 //! for what it must do.
 
+pub mod build;
 pub mod config;
 pub mod counters;
 pub mod error;

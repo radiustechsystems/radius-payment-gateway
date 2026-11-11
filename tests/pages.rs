@@ -189,7 +189,16 @@ async fn browsers_get_the_page_and_agents_the_json() {
             .contains("script-src 'self'")
     );
     let challenge = decode(headers["payment-required"].to_str().unwrap());
+    let build = headers["radius-gateway"].to_str().unwrap().to_owned();
+    assert!(
+        build.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")),
+        "{build}"
+    );
     let html = response.text().await.unwrap();
+    assert!(
+        html.starts_with(&format!("<!doctype html>\n<!-- radius-gateway {build} -->")),
+        "{html}"
+    );
     assert_eq!(
         embedded_challenge(&html),
         challenge,

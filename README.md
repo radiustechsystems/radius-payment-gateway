@@ -182,6 +182,12 @@ run the gateway directly on the internet with `remote_addr`.
 ### Admin endpoints
 
 - `GET /healthz`: the process is up.
+- `GET /version`: the crate version and git commit this binary was built from, as
+  `{"build": "0.1.0+abc123def"}`. The same id is in `--version`, the startup log line, the
+  `/policy` answer, the `radius-gateway` header of every 402, and a comment at the top of the
+  payment page, so a deployment can be checked with `curl -sI … | grep radius-gateway`. A build
+  from a modified tree says `-dirty`; one without a checkout says `unknown`, or what
+  `RADIUS_GATEWAY_COMMIT` was set to.
 - `GET /readyz`: a policy is loaded (or requests pass through without one).
 - `GET /policy`: the loaded policy's version, age and project, and how fetching is going.
 - `POST /policy/refresh`: fetch now, outside the schedule.

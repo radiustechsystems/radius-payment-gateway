@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 /// The gateway's settings.
 #[derive(Debug, Clone, Parser)]
-#[command(name = "radius-gateway", version, about)]
+#[command(name = "radius-gateway", version = crate::build::ID, about)]
 pub struct Config {
     /// Address the proxy listens on for the traffic nginx (or clients) send it.
     #[arg(long, env = "LISTEN", default_value = "0.0.0.0:8080")]
