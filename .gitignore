@@ -2,3 +2,7 @@
 .*~
 notes.txt
 /target
+env/
+run
+supervise/
+log/
