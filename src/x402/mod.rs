@@ -4,6 +4,7 @@
 pub mod claim;
 pub mod domains;
 pub mod facilitator;
+pub mod networks;
 pub mod supported;
 pub mod types;
 
@@ -24,7 +25,7 @@ use serde_json::Value;
 use crate::counters::{ClaimGuard, Ticket, TicketStore, UnknownSettlement};
 use crate::error::{error_response, uncacheable_error};
 use crate::gate::upstream_failed;
-use crate::pages::{PageVars, Pages, negotiate};
+use crate::pages::{PageOption, PageVars, Pages, negotiate};
 use crate::proxy::{UpstreamError, strip_framing};
 use crate::ticket;
 pub use facilitator::FacilitatorClient;
@@ -44,7 +45,7 @@ pub const NO_PAYMENT: &str = "PAYMENT-SIGNATURE header is required";
 
 /// What a browser's page may load, so a custom template can't be turned into a script injection
 /// by what the request controls: scripts and styles only from the gateway's own assets.
-const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'";
+const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'";
 
 /// A `charge` decision: what the policy wants paid.
 pub struct Charge<'a> {
@@ -213,6 +214,9 @@ pub struct Challenger<'a> {
     pages: &'a Pages,
     html: bool,
     vars: PageVars,
+    /// The page's Content Security Policy: the gateway's assets, and the RPCs of the networks
+    /// on offer for balance reads.
+    csp: String,
     /// The ticket to issue if this request settles: only a GET from the page.
     ticket: Option<TicketRequest>,
 }
@@ -254,10 +258,21 @@ impl<'a> Challenger<'a> {
             cookie_path: ticket::cookie_path(request.uri().path()).to_owned(),
             secure: requirements.resource.url.starts_with("https://"),
         });
+        let mut rpcs: Vec<&str> = requirements
+            .accepts
+            .iter()
+            .filter_map(|offer| networks::info(&offer.network))
+            .map(|network| network.rpc)
+            .collect();
+        rpcs.sort_unstable();
+        rpcs.dedup();
         Self {
             pages: ctx.pages,
             html,
             vars: page_vars(ctx, charge, requirements),
+            csp: format!("{PAGE_CSP}; connect-src 'self' {}", rpcs.join(" "))
+                .trim_end()
+                .to_owned(),
             ticket,
         }
     }
@@ -309,10 +324,9 @@ impl<'a> Challenger<'a> {
             CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),
         );
-        headers.insert(
-            "content-security-policy",
-            HeaderValue::from_static(PAGE_CSP),
-        );
+        if let Ok(value) = HeaderValue::from_str(&self.csp) {
+            headers.insert("content-security-policy", value);
+        }
         headers.insert(
             "x-content-type-options",
             HeaderValue::from_static("nosniff"),
@@ -321,47 +335,97 @@ impl<'a> Challenger<'a> {
     }
 }
 
-/// What the page says about the charge, from the option a browser can pay (the first EIP-3009
-/// `exact` option on an EVM network, else the first) and the gateway's branding.
+/// What the page says about the charge: every option, with the first a browser can pay (an
+/// EIP-3009 `exact` option on an EVM network, else the first) as the headline, and the gateway's
+/// branding.
 fn page_vars(
     ctx: &ChargeContext<'_>,
     charge: &Charge<'_>,
     requirements: &PaymentRequired,
 ) -> PageVars {
-    let index = payable_index(&requirements.accepts).unwrap_or(0);
-    let compiled = charge.accepts.get(index);
-    let offered = requirements.accepts.get(index);
-    let network = compiled.map(|c| c.network.as_str()).unwrap_or_default();
-    let known = catalog::network(network);
-    let amount = compiled
-        .map(|c| format_units(c.amount, c.decimals))
-        .unwrap_or_default();
-    let asset_symbol = compiled
-        .and_then(|c| known.and_then(|net| catalog::asset(net, c.asset)))
-        .map(|asset| asset.symbol.to_owned())
-        .or_else(|| {
-            offered
-                .and_then(|o| o.extra.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .or_else(|| compiled.map(|c| shorten(&c.asset.to_string())))
-        .unwrap_or_default();
+    let describe = |index: usize| -> Option<(PageOption, Value)> {
+        let compiled = charge.accepts.get(index)?;
+        let offered = requirements.accepts.get(index)?;
+        let known = catalog::network(&compiled.network);
+        let info = networks::info(&compiled.network);
+        let amount = format_units(compiled.amount, compiled.decimals);
+        let symbol = known
+            .and_then(|net| catalog::asset(net, compiled.asset))
+            .map(|asset| asset.symbol.to_owned())
+            .or_else(|| {
+                offered
+                    .extra
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| shorten(&offered.asset));
+        let network_name = info
+            .map(|net| net.name.to_owned())
+            .or_else(|| known.map(|net| net.label.to_owned()))
+            .unwrap_or_else(|| compiled.network.clone());
+        let option = PageOption {
+            index,
+            amount: amount.clone(),
+            symbol: symbol.clone(),
+            network_name: network_name.clone(),
+            pay_to: compiled.pay_to.to_string(),
+            payable: payable_index(std::slice::from_ref(offered)).is_some(),
+        };
+        let json = serde_json::json!({
+            "index": index,
+            "amount": amount,
+            "amountUnits": offered.amount,
+            "symbol": symbol,
+            "decimals": compiled.decimals,
+            "asset": offered.asset,
+            "payTo": offered.pay_to,
+            "network": offered.network,
+            "networkName": network_name,
+            "payable": option.payable,
+            "chain": info.map(networks::NetworkInfo::to_json),
+        });
+        Some((option, json))
+    };
+    let described: Vec<(PageOption, Value)> = (0..requirements.accepts.len())
+        .filter_map(describe)
+        .collect();
+    let headline = payable_index(&requirements.accepts).unwrap_or(0);
+    let first = described
+        .iter()
+        .find(|(option, _)| option.index == headline)
+        .or(described.first())
+        .map(|(option, _)| option.clone());
+    let amount = first.as_ref().map(|o| o.amount.clone()).unwrap_or_default();
+    let asset_symbol = first.as_ref().map(|o| o.symbol.clone()).unwrap_or_default();
+    let infos: Vec<&networks::NetworkInfo> = requirements
+        .accepts
+        .iter()
+        .filter_map(|offer| networks::info(&offer.network))
+        .collect();
+    let testnet = infos.iter().any(|net| net.testnet);
+    let base = infos.iter().any(|net| net.is_base());
+    let page_json = serde_json::json!({
+        "options": described.iter().map(|(_, json)| json).collect::<Vec<_>>(),
+    });
     PageVars {
         brand: ctx.brand.map(str::to_owned),
         brand_url: ctx.brand_url.map(str::to_owned),
         price: format!("{amount} {asset_symbol}").trim().to_owned(),
-        cli_command: cli_command(&requirements.resource.url, &amount),
+        cli_command: cli_command(&requirements.resource.url, &amount, testnet, base),
         amount,
         asset_symbol,
         description: charge.description.to_owned(),
         resource_url: requirements.resource.url.clone(),
-        network_name: known
-            .map(|net| net.label.to_owned())
-            .unwrap_or_else(|| network.to_owned()),
-        pay_to: compiled.map(|c| c.pay_to.to_string()).unwrap_or_default(),
+        network_name: first
+            .as_ref()
+            .map(|o| o.network_name.clone())
+            .unwrap_or_default(),
+        pay_to: first.map(|o| o.pay_to).unwrap_or_default(),
         error: String::new(),
         challenge_json: String::new(),
+        options: described.into_iter().map(|(option, _)| option).collect(),
+        page_json: page_json.to_string(),
     }
 }
 
@@ -397,10 +461,19 @@ pub fn format_units(amount: U256, decimals: u8) -> String {
     }
 }
 
-/// The radius-cli command that pays for `url`, with the URL single-quoted for a POSIX shell.
-pub fn cli_command(url: &str, amount: &str) -> String {
+/// The radius-cli command that pays for `url`, with the URL single-quoted for a POSIX shell:
+/// on testnet when the offer is, and allowed to pay on Base when an option is there.
+pub fn cli_command(url: &str, amount: &str, testnet: bool, base: bool) -> String {
     let quoted = url.replace('\'', "'\\''");
-    format!("radius-cli wallet pay get '{quoted}' --threshold {amount} -y")
+    format!(
+        "{}radius-cli wallet pay get '{quoted}' --threshold {amount}{} -y",
+        if testnet {
+            "RADIUS_NETWORK=testnet "
+        } else {
+            ""
+        },
+        if base { " --networks radius,base" } else { "" },
+    )
 }
 
 /// `0x4373…Fe6e` for an address.
@@ -920,8 +993,12 @@ mod tests {
         assert_eq!(format_units(U256::from(5u64), 0), "5");
         assert_eq!(format_units(U256::ZERO, 6), "0");
         assert_eq!(
-            cli_command("https://a.example/x?it's", "0.01"),
+            cli_command("https://a.example/x?it's", "0.01", false, false),
             "radius-cli wallet pay get 'https://a.example/x?it'\\''s' --threshold 0.01 -y"
+        );
+        assert_eq!(
+            cli_command("https://a.example/x", "0.01", true, true),
+            "RADIUS_NETWORK=testnet radius-cli wallet pay get 'https://a.example/x' --threshold 0.01 --networks radius,base -y"
         );
     }
 

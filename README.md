@@ -51,12 +51,16 @@ table; other tokens get an empty `extra`, which buyers can't sign.
 
 ## The payment page
 
-A browser that opens a paid URL gets a page instead of JSON: what the request costs, in which
-token and on which network, who is paid, and three ways to pay. **Connect wallet** signs the
-payment with an injected wallet (MetaMask or any EIP-1193 wallet; the wallet is asked to switch
-to, or add, the Radius network), sends it, and reloads the page once the gateway has settled
-it. Below it, collapsed, are the `radius-cli` command for a terminal and the raw challenge for
-a program. Agents, SDKs and `radius-cli` never see the page: the body is HTML only when the
+A browser that opens a paid URL gets a page instead of JSON: every way the policy accepts
+payment (SBC on Radius, USDC on Base, …), each with its price, network and recipient, and a
+single button. **Connect wallet** connects an injected wallet (MetaMask or any EIP-1193 wallet)
+and reads its balance for each option from that network's public RPC, marking what the wallet
+can and can't cover and selecting the first option it can. The button then pays the selected
+option: the wallet is asked to switch to (or add) that network, signs the payment, the page
+sends it and reloads once the gateway has settled it. Options paid only through Permit2 are
+listed but marked "terminal only". Below the button, collapsed, are the `radius-cli` command
+for a terminal (with `--networks radius,base` when Base is offered) and the raw challenge for a
+program. Agents, SDKs and `radius-cli` never see the page: the body is HTML only when the
 request's `Accept` prefers `text/html` over `application/json`, and the `PAYMENT-REQUIRED`
 header is the same either way.
 
@@ -86,13 +90,17 @@ is a template with `{{placeholders}}`, every one escaped for HTML: `brand`, `bra
 `brand_html` (the brand line, ready to drop in), `price` (`0.01 SBC`), `amount` (`0.01`),
 `asset_symbol`, `description` (the rule's), `resource_url`, `network_name`, `pay_to`, `error`
 (empty on a plain challenge; the facilitator's reason after a refused payment), `cli_command`,
-`challenge_json` (for the `<script type="application/json" id="x402-challenge">` block the
-script reads), and `assets_base` (where `assets/` is served). Everything under `assets/` is
+`options_html` (the ways to pay as a radio group the script drives), `challenge_json` and
+`page_json` (for the `<script type="application/json">` blocks `x402-challenge` and
+`x402-page` the script reads: the challenge, and each option's token, decimals and network
+with its RPC and explorer), and `assets_base` (where `assets/` is served). The headline
+variables `price`, `network_name` and `pay_to` describe the first option a browser can pay. Everything under `assets/` is
 served at `/_radius/assets/` with an `ETag` and a five-minute cache lifetime, before the policy
 sees the request, so a catch-all `charge` rule never charges the page's own files. The prefix is
 reserved: an upstream route under `/_radius/` can't be reached through the gateway. The page is
-served with a Content Security Policy that only allows scripts and styles from `/_radius/assets/`,
-so keep them there rather than inline. `--brand` and `--brand-url` put a name at the top of the
+served with a Content Security Policy that only allows scripts and styles from `/_radius/assets/`
+and connections to the gateway and the offered networks' RPCs, so keep scripts and styles there
+rather than inline. `--brand` and `--brand-url` put a name at the top of the
 default page.
 
 `node --test pages/assets/pay.test.mjs` checks the script's pure parts; the wallet flow itself

@@ -47,14 +47,37 @@ test('encodePayload round-trips through the header encoding', () => {
   assert.equal(pay.decodeHeader('not base64!'), null);
 });
 
+const chain = { chainName: 'Radius Testnet', blockExplorerUrls: ['https://testnet.radiustech.xyz'], faucet: 'https://testnet.radiustech.xyz/wallet' };
+const option = (index, payable, amountUnits) => ({ index, amount: '0.01', amountUnits, symbol: 'SBC', decimals: 6, payable, chain });
+
 test('errorMessage explains refusals, unknown settlements and outages', () => {
-  const o = offer('eip3009');
-  assert.match(pay.errorMessage(402, { error: 'insufficient_funds' }, null, o).link, /faucet|wallet/);
-  assert.match(pay.errorMessage(402, { error: 'settlement failed: x' }, null, o).text, /Payment refused: settlement failed: x/);
-  const unknown = pay.errorMessage(503, { code: 'settlement_unknown' }, { transaction: '0xabc' }, o);
+  const o = option(0, true, '10000');
+  assert.match(pay.errorMessage(402, { error: 'insufficient_funds' }, null, o, chain).link, /wallet/);
+  assert.match(pay.errorMessage(402, { error: 'settlement failed: x' }, null, o, chain).text, /Payment refused: settlement failed: x/);
+  const unknown = pay.errorMessage(503, { code: 'settlement_unknown' }, { transaction: '0xabc' }, o, chain);
   assert.match(unknown.text, /Do not pay again/);
   assert.equal(unknown.link, 'https://testnet.radiustech.xyz/tx/0xabc');
-  assert.match(pay.errorMessage(502, null, null, o).text, /Nothing was charged/);
+  assert.match(pay.errorMessage(502, null, null, o, null).text, /Nothing was charged/);
+});
+
+test('balances are read with balanceOf and shown in units', () => {
+  assert.equal(pay.balanceOfData('0x4373dD700774F8C3f649AC58B7EDCC112785Fe6e'),
+    '0x70a082310000000000000000000000004373dd700774f8c3f649ac58b7edcc112785fe6e');
+  assert.equal(pay.parseUint('0x' + '0'.repeat(63) + 'a'), 10n);
+  assert.equal(pay.parseUint('0x'), 0n);
+  assert.equal(pay.parseUint(undefined), null);
+  assert.equal(pay.formatUnits(10000n, 6), '0.01');
+  assert.equal(pay.formatUnits(520000n, 6), '0.52');
+  assert.equal(pay.formatUnits(1234567890n, 6), '1234.56789');
+  assert.equal(pay.formatUnits(0n, 6), '0');
+  assert.equal(pay.formatUnits(5n, 0), '5');
+});
+
+test('chooseOption keeps a covered selection and otherwise takes the first covered option', () => {
+  const options = [option(0, true, '10000'), option(1, false, '10000'), option(2, true, '10000')];
+  assert.equal(pay.chooseOption(options, { 0: 5000n, 1: 10n ** 9n, 2: 20000n }, 0), 2, 'moves off an uncovered option');
+  assert.equal(pay.chooseOption(options, { 0: 20000n, 2: 20000n }, 2), 2, 'keeps a covered one');
+  assert.equal(pay.chooseOption(options, { 0: 0n, 2: null }, 0), 0, 'stays when nothing covers');
 });
 
 test('shorten keeps the ends of an address', () => {

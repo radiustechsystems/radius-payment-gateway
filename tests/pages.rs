@@ -50,6 +50,34 @@ fn policy(facilitator: &str, description: &str) -> Value {
     })
 }
 
+/// A policy charging with SBC on Radius testnet, USDC on Base Sepolia, and a Permit2-only SBC
+/// on Base Sepolia, all through `facilitator`.
+fn multi_policy(facilitator: &str) -> Value {
+    let option = |network: &str, asset: &str, decimals: u8, amount: &str| {
+        json!({
+            "scheme": "exact", "network": network, "asset": asset, "decimals": decimals,
+            "amount": amount, "pay_to": PAY_TO, "facilitator": facilitator
+        })
+    };
+    let mut document = policy(facilitator, "Multi");
+    document["rules"][0]["action"]["accepts"] = json!([
+        option("eip155:72344", SBC, 6, "10000"),
+        option(
+            "eip155:84532",
+            "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            6,
+            "10000"
+        ),
+        option(
+            "eip155:84532",
+            "0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16",
+            6,
+            "10000"
+        ),
+    ]);
+    document
+}
+
 struct World {
     upstream: std::net::SocketAddr,
     platform: MockServer,
@@ -58,16 +86,23 @@ struct World {
 
 impl World {
     async fn start(description: &str) -> Self {
+        Self::start_with(|facilitator| policy(facilitator, description)).await
+    }
+
+    async fn start_with(document: impl FnOnce(&str) -> Value) -> Self {
         let upstream = spawn_upstream().await;
         let platform = MockServer::start().await;
         let facilitator = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/supported"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "kinds": [{
-                    "x402Version": 2, "scheme": "exact", "network": "eip155:72344", "asset": SBC,
-                    "extra": { "assetTransferMethod": "eip3009", "name": "Stable Coin", "version": "1" }
-                }],
+                "kinds": [
+                    { "x402Version": 2, "scheme": "exact", "network": "eip155:72344", "asset": SBC,
+                      "extra": { "assetTransferMethod": "eip3009", "name": "Stable Coin", "version": "1" } },
+                    { "x402Version": 2, "scheme": "exact", "network": "eip155:84532",
+                      "asset": "0xf9FB20B8E097904f0aB7d12e9DbeE88f2dcd0F16",
+                      "extra": { "assetTransferMethod": "permit2", "name": "Stable Coin", "version": "1" } }
+                ],
                 "extensions": [],
                 "signers": {}
             })))
@@ -80,7 +115,7 @@ impl World {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("etag", "\"1\"")
-                    .set_body_json(policy(&facilitator.uri(), description)),
+                    .set_body_json(document(&facilitator.uri())),
             )
             .mount(&platform)
             .await;
@@ -160,17 +195,16 @@ async fn browsers_get_the_page_and_agents_the_json() {
         challenge,
         "the page embeds the header's challenge"
     );
-    let network_label = domain::pricing::catalog::network("eip155:72344")
-        .expect("the catalog knows Radius testnet")
-        .label;
     for expected in [
         "<h1>Payment required</h1>",
         "Reports, per call",
         "0.01 SBC",
-        network_label,
+        "on Radius Testnet",
         PAY_TO,
         "https://api.example.com/reports/today?format=csv",
-        "radius-cli wallet pay get &#39;https://api.example.com/reports/today?format=csv&#39; --threshold 0.01 -y",
+        "RADIUS_NETWORK=testnet radius-cli wallet pay get &#39;https://api.example.com/reports/today?format=csv&#39; --threshold 0.01 -y",
+        r#"<input type="radio" name="option" value="0" checked>"#,
+        r#"id="x402-page">"#,
         "https://api.example.com/_radius/assets/style.css",
         "https://api.example.com/_radius/assets/pay.js",
     ] {
@@ -346,4 +380,75 @@ async fn a_pages_dir_overrides_files_one_by_one() {
         .unwrap();
     assert_ne!(stray.status(), 200);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn several_ways_to_pay_are_listed_with_what_the_script_needs() {
+    let world = World::start_with(multi_policy).await;
+    let gateway = world.gateway(&[]).await;
+
+    let response = client()
+        .get(gateway.url("/x"))
+        .header("accept", BROWSER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 402);
+    let csp = response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        csp.contains(
+            "connect-src 'self' https://rpc.testnet.radiustech.xyz https://sepolia.base.org"
+        ),
+        "{csp}"
+    );
+    let html = response.text().await.unwrap();
+    for expected in [
+        r#"<input type="radio" name="option" value="0" checked>"#,
+        "0.01 SBC</span><span class=\"option-network\">on Radius Testnet",
+        r#"<input type="radio" name="option" value="1">"#,
+        "0.01 USDC</span><span class=\"option-network\">on Base Sepolia",
+        r#"<input type="radio" name="option" value="2" disabled>"#,
+        "terminal only",
+        "RADIUS_NETWORK=testnet radius-cli wallet pay get &#39;https://api.example.com/x&#39; --threshold 0.01 --networks radius,base -y",
+    ] {
+        assert!(html.contains(expected), "missing {expected:?} in:\n{html}");
+    }
+
+    let start = html
+        .find(r#"<script type="application/json" id="x402-page">"#)
+        .unwrap();
+    let rest = &html[start..];
+    let json = &rest[rest.find('>').unwrap() + 1..rest.find("</script>").unwrap()];
+    let page: Value = serde_json::from_str(json).unwrap();
+    let options = page["options"].as_array().unwrap();
+    assert_eq!(options.len(), 3);
+    assert_eq!(options[0]["symbol"], "SBC");
+    assert_eq!(options[0]["decimals"], 6);
+    assert_eq!(options[0]["amountUnits"], "10000");
+    assert_eq!(options[0]["payable"], true);
+    assert_eq!(options[0]["chain"]["chainId"], 72344);
+    assert_eq!(
+        options[0]["chain"]["rpcUrls"][0],
+        "https://rpc.testnet.radiustech.xyz"
+    );
+    assert_eq!(options[1]["symbol"], "USDC");
+    assert_eq!(options[1]["networkName"], "Base Sepolia");
+    assert_eq!(options[1]["chain"]["chainId"], 84532);
+    assert_eq!(
+        options[2]["payable"], false,
+        "Permit2-only SBC on Base Sepolia"
+    );
+
+    // The challenge itself offers USDC with its EIP-712 domain, from the gateway's own table,
+    // since the facilitator doesn't describe it.
+    let challenge = embedded_challenge(&html);
+    assert_eq!(challenge["accepts"][1]["extra"]["name"], "USDC");
+    assert_eq!(challenge["accepts"][1]["extra"]["version"], "2");
+    assert_eq!(
+        challenge["accepts"][1]["extra"]["assetTransferMethod"],
+        "eip3009"
+    );
 }
