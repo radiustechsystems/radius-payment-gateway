@@ -108,8 +108,8 @@ pub fn resource_url(request: &Request<Body>, public_url: Option<&str>) -> String
 /// The payment requirements of a charge, for the request's resource: one entry per compiled
 /// option, in order (gate standard, 6.1). Each option's `extra` (the transfer method and the
 /// token's EIP-712 domain) comes from what its facilitator says it supports, else from the
-/// gateway's own table of tokens; the gas-sponsoring extension is declared when a facilitator
-/// offers it.
+/// gateway's own table of tokens; the gas-sponsoring extension is declared when an option is
+/// paid through Permit2 and its facilitator sponsors the approval.
 pub async fn challenge(
     facilitators: &FacilitatorClient,
     charge: &Charge<'_>,
@@ -129,7 +129,8 @@ pub async fn challenge(
             .and_then(|supported| supported.exact_extra(&accept.network, &asset))
             .or_else(|| domains::exact_extra(&accept.network, accept.asset))
             .unwrap_or_else(|| Value::Object(Default::default()));
-        if supported.is_some_and(|s| s.declares(supported::EIP2612_GAS_SPONSORING)) {
+        let permit2 = extra.get("assetTransferMethod") == Some(&Value::from("permit2"));
+        if permit2 && supported.is_some_and(|s| s.declares(supported::EIP2612_GAS_SPONSORING)) {
             sponsored = true;
         }
         accepts.push(PaymentRequirements {

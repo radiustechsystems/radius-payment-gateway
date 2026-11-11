@@ -162,8 +162,15 @@ fn accepted() -> Value {
         "asset": SBC,
         "payTo": PAY_TO,
         "maxTimeoutSeconds": 60,
-        "extra": { "assetTransferMethod": "permit2", "name": "Stable Coin", "version": "1" }
+        "extra": { "assetTransferMethod": "eip3009", "name": "Stable Coin", "version": "1" }
     })
+}
+
+/// The offer as a Permit2 buyer echoes it: the same terms, paid the other way.
+fn accepted_permit2() -> Value {
+    let mut accepted = accepted();
+    accepted["extra"]["assetTransferMethod"] = "permit2".into();
+    accepted
 }
 
 fn payload(accepted: Value, nonce: &str, signature: &str) -> Value {
@@ -203,7 +210,7 @@ const SIGNATURE: &str = "0x2d6a7588d6acca505cbf0d9a4a227e0c52c6c34008c8e8986a128
 fn permit2_payload(nonce: &str) -> Value {
     json!({
         "x402Version": 2,
-        "accepted": accepted(),
+        "accepted": accepted_permit2(),
         "payload": {
             "signature": SIGNATURE,
             "permit2Authorization": {
@@ -274,8 +281,8 @@ async fn challenges_without_a_payment() {
     assert_eq!(body["resource"]["description"], "Paid endpoints, per call");
     assert_eq!(body["accepts"], json!([accepted()]));
     assert!(
-        body["extensions"]["eip2612GasSponsoring"]["info"].is_object(),
-        "the facilitator sponsors the Permit2 approval, so the challenge says so: {body}"
+        body.get("extensions").is_none(),
+        "EIP-3009 needs no approval, so no sponsoring is declared: {body}"
     );
     // The facilitator was asked once, when the policy loaded, not per request.
     assert_eq!(world.calls("/supported").await, 1);
@@ -296,23 +303,20 @@ async fn falls_back_to_known_tokens_when_supported_is_unavailable() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(
         body["accepts"][0]["extra"],
-        json!({ "assetTransferMethod": "permit2", "name": "Stable Coin", "version": "1" }),
-        "SBC on Radius is paid through Permit2 even without the facilitator's word"
+        json!({ "assetTransferMethod": "eip3009", "name": "Stable Coin", "version": "1" }),
+        "SBC on Radius is paid through EIP-3009 even without the facilitator's word"
     );
-    assert!(
-        body.get("extensions").is_none(),
-        "no sponsoring is promised without the facilitator's word"
-    );
+    assert!(body.get("extensions").is_none());
 }
 
 #[tokio::test]
-async fn offers_eip3009_where_the_facilitator_prefers_it() {
+async fn offers_permit2_with_sponsoring_for_tokens_only_settled_that_way() {
     let supported = json!({
         "kinds": [{
             "x402Version": 2, "scheme": "exact", "network": "eip155:72344", "asset": SBC,
-            "extra": { "assetTransferMethod": "eip3009", "name": "Stable Coin", "version": "1" }
+            "extra": { "assetTransferMethod": "permit2", "name": "Stable Coin", "version": "1" }
         }],
-        "extensions": [],
+        "extensions": ["eip2612GasSponsoring"],
         "signers": {}
     });
     let world = World::start_with(Some(supported)).await;
@@ -321,9 +325,12 @@ async fn offers_eip3009_where_the_facilitator_prefers_it() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(
         body["accepts"][0]["extra"]["assetTransferMethod"],
-        "eip3009"
+        "permit2"
     );
-    assert!(body.get("extensions").is_none());
+    assert!(
+        body["extensions"]["eip2612GasSponsoring"]["info"].is_object(),
+        "the facilitator sponsors the Permit2 approval, so the challenge says so: {body}"
+    );
 }
 
 #[tokio::test]

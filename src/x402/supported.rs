@@ -40,9 +40,9 @@ impl Supported {
     }
 
     /// The `extra` to offer for `asset` on `network` under the `exact` scheme, from the kind the
-    /// facilitator advertises for it. With a choice of transfer methods: Permit2 when the
-    /// facilitator sponsors the approval (gasless either way, and the only method for tokens
-    /// without EIP-3009), else EIP-3009 (no approval needed), else whatever is left.
+    /// facilitator advertises for it. With a choice of transfer methods, EIP-3009 comes first:
+    /// one signature moves the tokens, with no Permit2 allowance to arrange and no extension to
+    /// carry. Permit2 is for tokens the facilitator only settles that way.
     pub fn exact_extra(&self, network: &str, asset: &str) -> Option<Value> {
         let kinds: Vec<&Kind> = self
             .kinds
@@ -65,12 +65,7 @@ impl Supported {
                 .unwrap_or("eip3009")
                 .to_owned()
         };
-        let preferred = if self.declares(EIP2612_GAS_SPONSORING) {
-            ["permit2", "eip3009"]
-        } else {
-            ["eip3009", "permit2"]
-        };
-        preferred
+        ["eip3009", "permit2"]
             .iter()
             .find_map(|wanted| kinds.iter().find(|kind| method(kind) == *wanted))
             .or(kinds.first())
@@ -111,14 +106,16 @@ mod tests {
 
     const SBC: &str = "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb";
 
-    fn radius() -> Supported {
+    fn kind(transfer_method: &str) -> Value {
+        json!({
+            "x402Version": 2, "scheme": "exact", "network": "eip155:72344", "asset": SBC,
+            "extra": { "assetTransferMethod": transfer_method, "name": "Stable Coin", "version": "1" }
+        })
+    }
+
+    fn radius(kinds: Vec<Value>) -> Supported {
         serde_json::from_value(json!({
-            "kinds": [
-                { "x402Version": 2, "scheme": "exact", "network": "eip155:72344", "asset": SBC,
-                  "extra": { "assetTransferMethod": "eip3009", "name": "Stable Coin", "version": "1" } },
-                { "x402Version": 2, "scheme": "exact", "network": "eip155:72344", "asset": SBC,
-                  "extra": { "assetTransferMethod": "permit2", "name": "Stable Coin", "version": "1" } }
-            ],
+            "kinds": kinds,
             "extensions": ["eip2612GasSponsoring"],
             "signers": {}
         }))
@@ -126,20 +123,20 @@ mod tests {
     }
 
     #[test]
-    fn prefers_permit2_when_the_approval_is_sponsored() {
-        let extra = radius()
+    fn prefers_eip3009_when_offered() {
+        let supported = radius(vec![kind("permit2"), kind("eip3009")]);
+        let extra = supported
             .exact_extra("eip155:72344", &SBC.to_lowercase())
             .unwrap();
-        assert_eq!(extra["assetTransferMethod"], "permit2");
+        assert_eq!(extra["assetTransferMethod"], "eip3009");
         assert_eq!(extra["name"], "Stable Coin");
-        assert!(radius().exact_extra("eip155:8453", SBC).is_none());
+        assert!(supported.exact_extra("eip155:8453", SBC).is_none());
     }
 
     #[test]
-    fn prefers_eip3009_without_sponsoring() {
-        let mut supported = radius();
-        supported.extensions.clear();
+    fn offers_permit2_for_tokens_only_settled_that_way() {
+        let supported = radius(vec![kind("permit2")]);
         let extra = supported.exact_extra("eip155:72344", SBC).unwrap();
-        assert_eq!(extra["assetTransferMethod"], "eip3009");
+        assert_eq!(extra["assetTransferMethod"], "permit2");
     }
 }
