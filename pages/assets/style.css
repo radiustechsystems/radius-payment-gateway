@@ -1,0 +1,231 @@
+/* The payment page. One centered column; nothing else. Light and dark follow the system. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f4;
+  --card: #ffffff;
+  --text: #16181d;
+  --muted: #6b7280;
+  --line: #e4e4e0;
+  --accent: #1d4ed8;
+  --accent-text: #ffffff;
+  --accent-hover: #1e40af;
+  --error: #b91c1c;
+  --ok: #15803d;
+  --code: #f1f1ee;
+  --radius: 12px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111214;
+    --card: #1a1b1f;
+    --text: #ececea;
+    --muted: #9ca3af;
+    --line: #2b2d33;
+    --accent: #3b82f6;
+    --accent-text: #0b1020;
+    --accent-hover: #60a5fa;
+    --error: #f87171;
+    --ok: #4ade80;
+    --code: #121317;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10vh 16px 48px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  width: 100%;
+  max-width: 28rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 32px 28px;
+}
+
+.brand {
+  margin: 0 0 20px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.brand a { color: inherit; text-decoration: none; }
+.brand a:hover { color: var(--text); }
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.description {
+  margin: 4px 0 24px;
+  color: var(--muted);
+}
+
+.description:empty { display: none; }
+
+.terms {
+  margin: 0 0 28px;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+.terms > div {
+  display: flex;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.terms dt {
+  flex: 0 0 5.5rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding-top: 2px;
+}
+
+.terms dd {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.terms .price { font-weight: 650; }
+
+.terms code,
+.terms .url {
+  font-family: var(--mono);
+  font-size: 0.875rem;
+}
+
+.terms .url {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.primary {
+  display: block;
+  width: 100%;
+  padding: 14px 18px;
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.primary:hover:not(:disabled) { background: var(--accent-hover); }
+.primary:disabled { opacity: 0.55; cursor: default; }
+
+.secondary {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.secondary:hover { border-color: var(--muted); }
+
+.status {
+  min-height: 1.5rem;
+  margin: 12px 0 0;
+  font-size: 0.9375rem;
+}
+
+.status.error { color: var(--error); }
+.status.ok { color: var(--ok); }
+.status a { color: inherit; }
+
+.note {
+  margin: 8px 0 28px;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.option {
+  border-top: 1px solid var(--line);
+  padding: 12px 0;
+}
+
+.option summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.option summary::-webkit-details-marker { display: none; }
+
+.option summary::after {
+  content: "+";
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.option[open] summary::after { content: "–"; }
+
+.option p {
+  margin: 10px 0;
+  font-size: 0.9375rem;
+  color: var(--muted);
+}
+
+.option a { color: var(--text); }
+
+pre {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--code);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.command {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.command pre { flex: 1 1 auto; }
+
+.challenge { max-height: 20rem; overflow: auto; }

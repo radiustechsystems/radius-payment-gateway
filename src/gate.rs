@@ -6,17 +6,19 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
-use http::header::{HeaderName, HeaderValue};
+use http::header::{HeaderName, HeaderValue, SET_COOKIE};
 use http::{Request, StatusCode};
 use policy::eval::{Decision, Outcome};
 use tracing::Instrument;
 
 use crate::config::NoPolicy;
-use crate::counters::{ClaimGuard, CounterStore};
+use crate::counters::{ClaimGuard, CounterStore, TicketStore};
 use crate::error::error_response;
 use crate::eval;
+use crate::pages::Pages;
 use crate::policy::PolicyHandle;
 use crate::proxy::{Upstream, UpstreamError};
+use crate::ticket;
 use crate::x402::{self, Charge, ChargeContext, FacilitatorClient};
 
 pub struct Gate {
@@ -24,8 +26,10 @@ pub struct Gate {
     pub upstream: Upstream,
     pub counters: Arc<dyn CounterStore>,
     pub claims: Arc<dyn ClaimGuard>,
+    pub tickets: Arc<dyn TicketStore>,
     pub no_policy: NoPolicy,
     pub facilitator: Arc<FacilitatorClient>,
+    pub pages: Arc<Pages>,
     pub payments: PaymentSettings,
 }
 
@@ -36,6 +40,9 @@ pub struct PaymentSettings {
     pub max_timeout_seconds: u32,
     pub paid_body_limit: usize,
     pub claim_ttl: std::time::Duration,
+    pub brand: Option<String>,
+    pub brand_url: Option<String>,
+    pub ticket_ttl: std::time::Duration,
 }
 
 impl Gate {
@@ -62,6 +69,53 @@ impl Gate {
 
     async fn decide_and_respond(&self, request: Request<Body>, peer: SocketAddr) -> Response {
         let span = tracing::Span::current();
+        let mut request = request;
+        // A ticket from the payment page delivers a purchase already settled: once, for the
+        // exact method and URL it was issued for, without the policy counting the request again.
+        if let Some(id) = ticket::take_from_request(request.headers_mut()) {
+            let method = ticket::normalized_method(request.method());
+            let path_and_query = request
+                .uri()
+                .path_and_query()
+                .map_or("/", |pq| pq.as_str())
+                .to_owned();
+            let bound = self
+                .tickets
+                .peek(&id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|ticket| {
+                    ticket.method == method && ticket.path_and_query == path_and_query
+                });
+            if bound && let Ok(Some(ticket)) = self.tickets.redeem(&id).await {
+                span.record("rule", ticket.rule.as_deref().unwrap_or("none"));
+                span.record("decision", "ticket");
+                let cookie_path = ticket::cookie_path(request.uri().path()).to_owned();
+                let secure = x402::public_https(&request, self.payments.public_url.as_deref());
+                return match self.upstream.forward(request, peer).await {
+                    Ok(response) => {
+                        let mut response = response.map(Body::new).into_response();
+                        response
+                            .headers_mut()
+                            .append(SET_COOKIE, ticket::clear_cookie(&cookie_path, secure));
+                        response
+                    }
+                    Err(error) => {
+                        // Nothing was delivered, so the ticket is good again.
+                        if let Err(store) = self
+                            .tickets
+                            .issue(&id, ticket, self.payments.ticket_ttl)
+                            .await
+                        {
+                            tracing::error!(error = %store, "ticket couldn't be restored");
+                        }
+                        upstream_failed(error)
+                    }
+                };
+            }
+            // An unknown, used or mismatched ticket: the policy decides as usual.
+        }
         let Some(loaded) = self.policy.load() else {
             // No policy was ever loaded: `failure.no_policy`, from our configuration.
             span.record("rule", "none");
@@ -114,6 +168,7 @@ impl Gate {
                 ..
             } => {
                 let charge = Charge {
+                    rule: decision.rule.as_deref(),
                     description,
                     accepts,
                 };
@@ -125,6 +180,11 @@ impl Gate {
                     upstream_timeout: self.upstream.timeout(),
                     max_timeout_seconds: self.payments.max_timeout_seconds,
                     public_url: self.payments.public_url.as_deref(),
+                    pages: &self.pages,
+                    brand: self.payments.brand.as_deref(),
+                    brand_url: self.payments.brand_url.as_deref(),
+                    tickets: &self.tickets,
+                    ticket_ttl: self.payments.ticket_ttl,
                 };
                 let (response, outcome) = x402::charge(&context, &charge, request, |request| {
                     self.forward(request, peer)

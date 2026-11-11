@@ -5,6 +5,7 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -27,8 +28,8 @@ pub struct Config {
 
     /// The seller's API the gateway proxies to, e.g. `http://127.0.0.1:3000` or
     /// `https://api.internal/v1`. A path is used as a prefix for every forwarded request.
-    #[arg(long, env = "UPSTREAM", value_parser = parse_upstream)]
-    pub upstream: Uri,
+    #[arg(long, env = "UPSTREAM", value_parser = parse_upstream, required_unless_present = "export_pages")]
+    pub upstream: Option<Uri>,
 
     /// How long to wait for the upstream's response headers, and again for the part of a paid
     /// response's body that is buffered before settlement.
@@ -49,16 +50,25 @@ pub struct Config {
     pub platform_api_url: String,
 
     /// An organization API key with `endpoints:read`.
-    #[arg(long, env = "PLATFORM_API_KEY", hide_env_values = true)]
-    pub platform_api_key: Secret,
+    #[arg(
+        long,
+        env = "PLATFORM_API_KEY",
+        hide_env_values = true,
+        required_unless_present = "export_pages"
+    )]
+    pub platform_api_key: Option<Secret>,
 
     /// The organization the project belongs to (`org_…`).
-    #[arg(long, env = "ORGANIZATION_ID")]
-    pub organization_id: String,
+    #[arg(
+        long,
+        env = "ORGANIZATION_ID",
+        required_unless_present = "export_pages"
+    )]
+    pub organization_id: Option<String>,
 
     /// The project whose policy this gateway enforces.
-    #[arg(long, env = "PROJECT_ID")]
-    pub project_id: Uuid,
+    #[arg(long, env = "PROJECT_ID", required_unless_present = "export_pages")]
+    pub project_id: Option<Uuid>,
 
     /// How often to ask the platform for a newer policy. The gate standard allows 1s at most; 30
     /// to 60 seconds is right for most deployments.
@@ -98,6 +108,28 @@ pub struct Config {
     #[arg(long, env = "CLAIM_TTL", default_value = "24h", value_parser = parse_duration)]
     pub claim_ttl: Duration,
 
+    /// A directory of page files that override the built-in ones: `402.html`, the payment
+    /// page a browser gets, and anything under `assets/`, served at `/_radius/assets/`. Start
+    /// from the built-in files with `--export-pages`.
+    #[arg(long, env = "PAGES_DIR", value_name = "DIR")]
+    pub pages_dir: Option<PathBuf>,
+
+    /// Write the built-in page files to this directory and exit.
+    #[arg(long, value_name = "DIR")]
+    pub export_pages: Option<PathBuf>,
+
+    /// A name shown at the top of the payment page.
+    #[arg(long, env = "BRAND")]
+    pub brand: Option<String>,
+
+    /// Where the brand name links to.
+    #[arg(long, env = "BRAND_URL", value_parser = parse_http_url)]
+    pub brand_url: Option<String>,
+
+    /// How long a browser's ticket for a page it paid for stays valid.
+    #[arg(long, env = "TICKET_TTL", default_value = "60s", value_parser = parse_duration, hide = true)]
+    pub ticket_ttl: Duration,
+
     /// Log filter, in `tracing_subscriber::EnvFilter` syntax.
     #[arg(long, env = "RUST_LOG", default_value = "info,radius_gateway=debug")]
     pub log_filter: String,
@@ -105,6 +137,36 @@ pub struct Config {
     /// Log format.
     #[arg(long, env = "LOG_FORMAT", value_enum, default_value_t = LogFormat::Text, ignore_case = true)]
     pub log_format: LogFormat,
+}
+
+/// The settings a running gateway can't do without. They're optional on the command line only
+/// so `--export-pages` can run without them.
+pub struct Required<'a> {
+    pub upstream: &'a Uri,
+    pub platform_api_key: &'a Secret,
+    pub organization_id: &'a str,
+    pub project_id: Uuid,
+}
+
+impl Config {
+    pub fn required(&self) -> anyhow::Result<Required<'_>> {
+        let missing = |flag: &str| anyhow::anyhow!("{flag} is required (unless --export-pages)");
+        Ok(Required {
+            upstream: self
+                .upstream
+                .as_ref()
+                .ok_or_else(|| missing("--upstream"))?,
+            platform_api_key: self
+                .platform_api_key
+                .as_ref()
+                .ok_or_else(|| missing("--platform-api-key"))?,
+            organization_id: self
+                .organization_id
+                .as_deref()
+                .ok_or_else(|| missing("--organization-id"))?,
+            project_id: self.project_id.ok_or_else(|| missing("--project-id"))?,
+        })
+    }
 }
 
 /// `defaults.failure.no_policy`, which the gate reads from its own configuration.
@@ -171,6 +233,15 @@ fn parse_origin_with_prefix(value: &str) -> Result<String, String> {
         return Err(
             "must be a URL with a host and no query, e.g. `https://api.example.com`".to_owned(),
         );
+    }
+    Ok(url.to_owned())
+}
+
+/// An `http` or `https` URL, as given.
+fn parse_http_url(value: &str) -> Result<String, String> {
+    let url = value.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) || url.len() < 9 {
+        return Err("must be an http:// or https:// URL".to_owned());
     }
     Ok(url.to_owned())
 }
@@ -242,10 +313,13 @@ mod tests {
         let config = parse(&[]).unwrap();
         assert_eq!(
             format!("{:?}", config.platform_api_key),
-            "Secret([redacted])"
+            "Some(Secret([redacted]))"
         );
         assert!(!format!("{config:?}").contains("sk_test"));
-        assert_eq!(config.platform_api_key.expose(), "sk_test");
+        assert_eq!(
+            config.required().unwrap().platform_api_key.expose(),
+            "sk_test"
+        );
     }
 
     #[test]
@@ -256,11 +330,24 @@ mod tests {
             ("https://api.internal/v1", "https://api.internal/v1"),
         ] {
             let config = parse_with_upstream(flag, &[]).unwrap();
-            assert_eq!(config.upstream.to_string(), expected, "{flag}");
+            assert_eq!(
+                config.required().unwrap().upstream.to_string(),
+                expected,
+                "{flag}"
+            );
         }
         for flag in ["ftp://x", "http://api.internal/?a=b", "http://"] {
             assert!(parse_with_upstream(flag, &[]).is_err(), "{flag}");
         }
+    }
+
+    #[test]
+    fn export_pages_needs_nothing_else() {
+        let config =
+            Config::try_parse_from(["radius-gateway", "--export-pages", "/tmp/pages"]).unwrap();
+        assert!(config.export_pages.is_some());
+        assert!(config.required().is_err());
+        assert!(Config::try_parse_from(["radius-gateway"]).is_err());
     }
 
     #[test]

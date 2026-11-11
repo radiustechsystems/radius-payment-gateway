@@ -6,16 +6,19 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use http::{Request, StatusCode};
+use http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
+use http::{HeaderMap, HeaderValue, Request, StatusCode};
 use tokio::net::TcpListener;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
 use crate::config::{Config, NoPolicy};
 use crate::counters::MemoryStore;
+use crate::error::error_response;
 use crate::gate::{Gate, PaymentSettings};
+use crate::pages::{ASSETS_PREFIX, Pages};
 use crate::policy::{ACCEPTED_SCHEMAS, PlatformClient, PolicyHandle, Poller};
 use crate::proxy::Upstream;
 use crate::x402::FacilitatorClient;
@@ -25,19 +28,25 @@ use crate::x402::FacilitatorClient;
 pub struct AppState {
     pub gates: Vec<Arc<Gate>>,
     pub pollers: Vec<Arc<Poller>>,
+    pub pages: Arc<Pages>,
 }
 
 impl AppState {
     /// Builds the gates and fetches each policy once, waiting up to `startup_policy_wait`.
     pub async fn new(config: &Config) -> anyhow::Result<Self> {
+        let required = config.required()?;
         tracing::info!(
             schemas = ACCEPTED_SCHEMAS.join(", "),
-            project = %config.project_id,
-            upstream = %config.upstream,
+            project = %required.project_id,
+            upstream = %required.upstream,
             "radius-gateway starting"
         );
+        let pages = Arc::new(Pages::load(
+            config.pages_dir.as_deref(),
+            config.public_url.as_deref(),
+        )?);
         let upstream = Upstream::new(
-            config.upstream.clone(),
+            required.upstream.clone(),
             config.upstream_connect_timeout,
             config.upstream_timeout,
         );
@@ -48,9 +57,9 @@ impl AppState {
         let facilitator = Arc::new(FacilitatorClient::new(config.facilitator_timeout)?);
         let client = PlatformClient::new(
             &config.platform_api_url,
-            config.platform_api_key.clone(),
-            &config.organization_id,
-            config.project_id,
+            required.platform_api_key.clone(),
+            required.organization_id,
+            required.project_id,
             Duration::from_secs(10),
         )?;
         let poller = Arc::new(Poller::new(
@@ -58,7 +67,7 @@ impl AppState {
             policy.clone(),
             facilitator.clone(),
             config.poll_interval,
-            config.project_id,
+            required.project_id,
         ));
         let mut first_polled = false;
         if !config.startup_policy_wait.is_zero() {
@@ -76,19 +85,25 @@ impl AppState {
             policy,
             upstream,
             counters: store.clone(),
-            claims: store,
+            claims: store.clone(),
+            tickets: store,
             no_policy: config.no_policy,
             facilitator,
+            pages: pages.clone(),
             payments: PaymentSettings {
                 public_url: config.public_url.clone(),
                 max_timeout_seconds: config.max_timeout_seconds,
                 paid_body_limit: config.paid_body_limit,
                 claim_ttl: config.claim_ttl,
+                brand: config.brand.clone(),
+                brand_url: config.brand_url.clone(),
+                ticket_ttl: config.ticket_ttl,
             },
         };
         Ok(Self {
             gates: vec![Arc::new(gate)],
             pollers: vec![poller],
+            pages,
         })
     }
 
@@ -97,9 +112,11 @@ impl AppState {
     }
 }
 
-/// The proxy: every path, every method.
+/// The proxy: every path, every method, except the pages' own assets, which are answered here
+/// before any policy sees them.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route(&format!("{ASSETS_PREFIX}/{{*path}}"), get(asset))
         .fallback(handle)
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -113,6 +130,37 @@ async fn handle(
 ) -> Response {
     let gate = state.select_gate(&request).clone();
     gate.handle(request, peer).await
+}
+
+/// A page asset: cacheable, with an ETag.
+async fn asset(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(asset) = state.pages.asset(&path) else {
+        return error_response(StatusCode::NOT_FOUND, "not_found", "no such asset");
+    };
+    let unchanged = headers
+        .get(IF_NONE_MATCH)
+        .is_some_and(|value| value == asset.etag);
+    let mut response = if unchanged {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        (StatusCode::OK, asset.body.clone()).into_response()
+    };
+    let h = response.headers_mut();
+    h.insert(CONTENT_TYPE, HeaderValue::from_static(asset.content_type));
+    h.insert(ETAG, asset.etag.clone());
+    h.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 /// Health and policy status, on a listener of its own so it never shadows an upstream path.

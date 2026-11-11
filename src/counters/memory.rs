@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 
-use super::{ClaimError, ClaimGuard, CounterStore, CounterUnavailable, UnknownSettlement};
+use super::{
+    ClaimError, ClaimGuard, CounterStore, CounterUnavailable, Ticket, TicketStore,
+    UnknownSettlement,
+};
 
 struct Count {
     value: u64,
@@ -34,6 +37,7 @@ impl Claim {
 pub struct MemoryStore {
     counters: DashMap<String, Count>,
     claims: DashMap<String, Claim>,
+    tickets: DashMap<String, (Ticket, Instant)>,
 }
 
 impl MemoryStore {
@@ -47,6 +51,7 @@ impl MemoryStore {
         let now = Instant::now();
         self.counters.retain(|_, count| count.expires > now);
         self.claims.retain(|_, claim| claim.expires > now);
+        self.tickets.retain(|_, (_, expires)| *expires > now);
     }
 
     /// Sweeps every `every` for as long as the store is alive.
@@ -137,9 +142,61 @@ impl ClaimGuard for MemoryStore {
     }
 }
 
+#[async_trait]
+impl TicketStore for MemoryStore {
+    async fn issue(&self, id: &str, ticket: Ticket, ttl: Duration) -> Result<(), ClaimError> {
+        self.tickets
+            .insert(id.to_owned(), (ticket, Instant::now() + ttl));
+        Ok(())
+    }
+
+    async fn peek(&self, id: &str) -> Result<Option<Ticket>, ClaimError> {
+        let now = Instant::now();
+        Ok(self
+            .tickets
+            .get(id)
+            .filter(|entry| entry.1 > now)
+            .map(|entry| entry.0.clone()))
+    }
+
+    async fn redeem(&self, id: &str) -> Result<Option<Ticket>, ClaimError> {
+        let now = Instant::now();
+        Ok(self
+            .tickets
+            .remove(id)
+            .filter(|(_, (_, expires))| *expires > now)
+            .map(|(_, (ticket, _))| ticket))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tickets_are_single_use_and_expire() {
+        let store = MemoryStore::new();
+        let ticket = Ticket {
+            method: "GET".into(),
+            path_and_query: "/paid/x?y=1".into(),
+            rule: Some("charge".into()),
+        };
+        store
+            .issue("t", ticket.clone(), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(store.peek("t").await, Ok(Some(ticket.clone())));
+        assert_eq!(
+            store.peek("t").await,
+            Ok(Some(ticket.clone())),
+            "peek leaves it"
+        );
+        assert_eq!(store.redeem("t").await, Ok(Some(ticket.clone())));
+        assert_eq!(store.redeem("t").await, Ok(None));
+        store.issue("e", ticket, Duration::ZERO).await.unwrap();
+        assert_eq!(store.peek("e").await, Ok(None));
+        assert_eq!(store.redeem("e").await, Ok(None));
+    }
 
     #[tokio::test]
     async fn counts_and_expires() {
