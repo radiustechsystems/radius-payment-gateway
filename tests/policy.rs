@@ -95,6 +95,17 @@ async fn loads_the_policy_and_asks_conditionally_afterwards() {
     assert_eq!(status["loaded"], true);
     assert_eq!(status["version"], 1);
     assert_eq!(status["fetch"]["attempts"], 1);
+    assert!(status["build"].as_str().unwrap().contains('+'), "{status}");
+    let version: Value = client()
+        .get(gateway.admin_url("/version"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(version["name"], "radius-gateway");
+    assert_eq!(version["build"], status["build"]);
 
     let refreshed = refresh(&gateway).await;
     assert_eq!(refreshed["refresh"], "NotModified");

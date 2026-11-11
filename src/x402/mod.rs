@@ -194,6 +194,9 @@ pub async fn challenge(
     }
 }
 
+/// Names the build on a 402, so a deployment can be checked with curl.
+pub const BUILD_HEADER: HeaderName = HeaderName::from_static("radius-gateway");
+
 /// A 402 with the requirements in the `PAYMENT-REQUIRED` header and as the JSON body. A
 /// challenge is for this request only, so caches must not answer another with it.
 pub fn payment_required_response(mut requirements: PaymentRequired, error: &str) -> Response {
@@ -204,6 +207,7 @@ pub fn payment_required_response(mut requirements: PaymentRequired, error: &str)
     headers.insert(PAYMENT_REQUIRED, encoded);
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(VARY, HeaderValue::from_static("Accept"));
+    headers.insert(BUILD_HEADER, HeaderValue::from_static(crate::build::ID));
     response
 }
 
@@ -320,6 +324,7 @@ impl<'a> Challenger<'a> {
         headers.insert(PAYMENT_REQUIRED, encoded);
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         headers.insert(VARY, HeaderValue::from_static("Accept"));
+        headers.insert(BUILD_HEADER, HeaderValue::from_static(crate::build::ID));
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),

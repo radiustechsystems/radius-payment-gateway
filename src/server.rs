@@ -36,6 +36,7 @@ impl AppState {
     pub async fn new(config: &Config) -> anyhow::Result<Self> {
         let required = config.required()?;
         tracing::info!(
+            build = crate::build::ID,
             schemas = ACCEPTED_SCHEMAS.join(", "),
             project = %required.project_id,
             upstream = %required.upstream,
@@ -167,6 +168,7 @@ async fn asset(
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/version", get(version))
         .route("/readyz", get(ready))
         .route("/policy", get(policy_status))
         .route("/policy/refresh", post(policy_refresh))
@@ -187,7 +189,20 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn policy_status(State(state): State<Arc<AppState>>) -> Response {
-    axum::Json(state.gates[0].policy.snapshot()).into_response()
+    let mut snapshot = state.gates[0].policy.snapshot();
+    snapshot["build"] = crate::build::ID.into();
+    axum::Json(snapshot).into_response()
+}
+
+/// Which code this is.
+async fn version() -> Response {
+    axum::Json(serde_json::json!({
+        "name": "radius-gateway",
+        "version": crate::build::VERSION,
+        "commit": crate::build::COMMIT,
+        "build": crate::build::ID,
+    }))
+    .into_response()
 }
 
 /// Fetches the policy now, outside the schedule, and reports the outcome and the status.

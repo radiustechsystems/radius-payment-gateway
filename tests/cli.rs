@@ -55,6 +55,24 @@ fn help_lists_every_setting_with_its_environment_variable() {
 }
 
 #[test]
+fn version_names_the_commit() {
+    let output = gateway(&["--version"], &[]);
+    assert!(output.status.success());
+    let text = stdout(&output);
+    let id = text.trim().rsplit(' ').next().unwrap_or_default();
+    let (version, commit) = id.split_once('+').expect("<version>+<commit>");
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    assert!(
+        commit == "unknown"
+            || commit
+                .trim_end_matches("-dirty")
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+        "{text}"
+    );
+}
+
+#[test]
 fn export_pages_writes_the_defaults_and_exits() {
     let dir = std::env::temp_dir().join(format!("radius-gateway-export-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
