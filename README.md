@@ -30,7 +30,14 @@ decisions are the reference implementation. Accepted policy formats: `radius.pol
 4. `charge`: answers `402` with a `PAYMENT-REQUIRED` challenge. A retry carrying
    `PAYMENT-SIGNATURE` is matched against the offer, claimed against replay, verified with the
    option's facilitator, forwarded, and settled after a 2xx. The response carries
-   `PAYMENT-RESPONSE`. An upstream error is never charged.
+   `PAYMENT-RESPONSE`. An upstream error is never charged, and a payment whose request ends
+   before `/settle` is called (an upstream error, a buyer that disconnects) can be tried again.
+   A payment that names a `resource.url` must name this request's, the URL its challenge gives,
+   compared as URLs (scheme and host in any case, a default port or not); the field isn't
+   signed, so this only catches a payment sent to the wrong route. A paid response carries
+   `Cache-Control: private` (replacing a `public`) unless the upstream's already says `private`
+   or `no-store`, so a shared cache can't give it to another buyer; challenges and the
+   `settlement_unknown` answer carry `no-store`.
 
 The challenge offers every payment option of the rule as the policy compiled it (network, token,
 amount, recipient). What a buyer has to sign for a token (its transfer method and EIP-712 domain)
@@ -46,12 +53,13 @@ Error responses are JSON `{"code": "…", "message": "…"}`:
 | --- | --- | --- |
 | `PAYMENT-SIGNATURE` isn't a base64 JSON payload | 400 | `invalid_payment` |
 | Percent-decoding the path would select another rule | 400 | `ambiguous_path` |
-| Payment required, or a payment that wasn't accepted / didn't verify / failed to settle | 402 | (the body is the x402 challenge, with `error`) |
+| Payment required, or a payment that wasn't accepted / named another resource / didn't verify / was refused at settlement | 402 | (the body is the x402 challenge, with `error`) |
 | Unmatched request under `unmatched: deny` | 403 | `no_matching_rule` |
 | Over a rate limit | 429 | `rate_limited` |
 | Upstream unreachable / didn't answer in time | 502 / 504 | `upstream_unavailable` / `upstream_timeout` |
-| Facilitator unreachable or answered without a verdict | 502 | `facilitator_unavailable` |
-| No policy ever loaded and `NO_POLICY=deny` | 503 | `policy_unavailable` |
+| Facilitator unreachable at `/verify`, or answered a 5xx, a redirect (never followed) or without a verdict | 502 | `facilitator_unavailable` |
+| Settlement's outcome unknown: `settlement_pending`, a failure other than `invalid_transaction_state` that names a transaction, or no verdict from `/settle` (timeout, 5xx, redirect). The content is withheld, the payment stays claimed, `PAYMENT-RESPONSE` carries the transaction when there is one, and a repeat of the payment gets the same answer | 503 | `settlement_unknown` |
+| No policy ever loaded, under `NO_POLICY=deny` (the default) | 503 | `policy_unavailable` |
 | The claim store failed | 503 | `payment_unavailable` |
 
 ## Running it
@@ -63,16 +71,16 @@ Every setting is a flag or an environment variable; flags win.
 | `--listen` | `LISTEN` | `0.0.0.0:8080` | Where nginx sends traffic |
 | `--admin-listen` | `ADMIN_LISTEN` | `127.0.0.1:9901` | `/healthz`, `/readyz`, `/policy`, `POST /policy/refresh`. Unauthenticated: keep it private |
 | `--upstream` | `UPSTREAM` | required | Your API: `http://127.0.0.1:3000`, `https://api.internal/v1` (a path is a prefix) |
-| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `30s` | Time to the upstream's response headers |
+| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `30s` | Time to the upstream's response headers, and again to the buffered part of a paid response's body |
 | `--upstream-connect-timeout` | `UPSTREAM_CONNECT_TIMEOUT` | `5s` | |
 | `--platform-api-url` | `PLATFORM_API_URL` | `https://platform-api.radiustech.xyz` | |
 | `--platform-api-key` | `PLATFORM_API_KEY` | required | An organization API key with `endpoints:read` |
 | `--organization-id` | `ORGANIZATION_ID` | required | `org_…` |
 | `--project-id` | `PROJECT_ID` | required | The project whose policy is enforced |
 | `--poll-interval` | `POLL_INTERVAL` | `30s` | How often to ask for a newer policy (at least `1s`) |
-| `--startup-policy-wait` | `STARTUP_POLICY_WAIT` | `5s` | How long startup waits for the first policy |
+| `--startup-policy-wait` | `STARTUP_POLICY_WAIT` | `5s` | How long startup waits for the first policy. Until one loads, a failed fetch is retried after 1s, doubling up to 15s |
 | `--public-url` | `PUBLIC_URL` | | The URL buyers reach you at (`https://api.example.com`), the base of `resource.url` in challenges. Set it in production |
-| `--no-policy` | `NO_POLICY` | `allow` | What happens before the first policy loads: `allow` or `deny` (503) |
+| `--no-policy` | `NO_POLICY` | `deny` | What happens before the first policy loads: `deny` (503) or `allow` (every request is forwarded, paid routes free) |
 | `--max-timeout-seconds` | `MAX_TIMEOUT_SECONDS` | `60` | `maxTimeoutSeconds` offered to buyers |
 | `--facilitator-timeout` | `FACILITATOR_TIMEOUT` | `20s` | Per `/verify` or `/settle` call |
 | `--paid-body-limit` | `PAID_BODY_LIMIT` | `10485760` | Bytes of a paid response buffered before settling; larger responses settle on status and stream |

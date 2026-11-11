@@ -8,10 +8,18 @@ use std::time::{Duration, Instant};
 use common::{Echo, Gateway, client, spawn_upstream};
 use futures_util::StreamExt;
 
+/// No platform answers here, so no policy loads; these tests pass every request through.
+const PASS_THROUGH: &[&str] = &["--no-policy", "allow"];
+
 #[tokio::test]
 async fn forwards_the_request_and_rewrites_proxy_headers() {
     let upstream = spawn_upstream().await;
-    let gateway = Gateway::spawn(&format!("http://{upstream}"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
 
     let response = client()
         .post(gateway.url("/a/b?x=1&y=2"))
@@ -44,7 +52,12 @@ async fn forwards_the_request_and_rewrites_proxy_headers() {
 #[tokio::test]
 async fn keeps_an_upstream_path_prefix() {
     let upstream = spawn_upstream().await;
-    let gateway = Gateway::spawn(&format!("http://{upstream}/v1"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}/v1"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
     let echo: Echo = client()
         .get(gateway.url("/tx?x=1"))
         .send()
@@ -60,7 +73,12 @@ async fn keeps_an_upstream_path_prefix() {
 #[tokio::test]
 async fn streams_the_upstream_response() {
     let upstream = spawn_upstream().await;
-    let gateway = Gateway::spawn(&format!("http://{upstream}"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
 
     let started = Instant::now();
     let response = client().get(gateway.url("/stream")).send().await.unwrap();
@@ -82,7 +100,12 @@ async fn streams_the_upstream_response() {
 #[tokio::test]
 async fn forwards_head_as_head() {
     let upstream = spawn_upstream().await;
-    let gateway = Gateway::spawn(&format!("http://{upstream}"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
     let response = client().head(gateway.url("/x")).send().await.unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["x-echo-method"], "HEAD");
@@ -92,7 +115,12 @@ async fn forwards_head_as_head() {
 #[tokio::test]
 async fn passes_upstream_statuses_through() {
     let upstream = spawn_upstream().await;
-    let gateway = Gateway::spawn(&format!("http://{upstream}"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
     let response = client()
         .get(gateway.url("/status/418"))
         .send()
@@ -109,7 +137,12 @@ async fn answers_502_when_the_upstream_is_down() {
     let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = closed.local_addr().unwrap();
     drop(closed);
-    let gateway = Gateway::spawn(&format!("http://{addr}"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{addr}"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
     let response = client().get(gateway.url("/x")).send().await.unwrap();
     assert_eq!(response.status(), 502);
     let body: serde_json::Value = response.json().await.unwrap();
@@ -119,7 +152,12 @@ async fn answers_502_when_the_upstream_is_down() {
 #[tokio::test]
 async fn admin_listener_answers_health() {
     let upstream = spawn_upstream().await;
-    let gateway = Gateway::spawn(&format!("http://{upstream}"), "http://127.0.0.1:9", &[]).await;
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}"),
+        "http://127.0.0.1:9",
+        PASS_THROUGH,
+    )
+    .await;
     let response = client()
         .get(gateway.admin_url("/healthz"))
         .send()

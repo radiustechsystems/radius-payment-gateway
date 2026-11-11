@@ -309,7 +309,12 @@ async fn no_policy_is_the_gateways_own_setting() {
         .unwrap();
     assert_eq!(ready.status(), 503);
 
-    let allowing = Gateway::spawn(&format!("http://{upstream}"), &platform.uri(), &[]).await;
+    let allowing = Gateway::spawn(
+        &format!("http://{upstream}"),
+        &platform.uri(),
+        &["--no-policy", "allow"],
+    )
+    .await;
     let response = client().get(allowing.url("/x")).send().await.unwrap();
     assert_eq!(response.status(), 200);
     let ready = client()
@@ -353,4 +358,67 @@ async fn refuses_paths_whose_encoding_changes_the_rule() {
         echo.path, "/files/caf%C3%A9",
         "the path is forwarded as sent"
     );
+}
+
+#[tokio::test]
+async fn refuses_everything_before_the_first_policy_by_default() {
+    let upstream = spawn_upstream().await;
+    let platform = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&platform)
+        .await;
+
+    let gateway = Gateway::spawn(&format!("http://{upstream}"), &platform.uri(), &[]).await;
+    for route in ["/x", "/paid/report"] {
+        let response = client().get(gateway.url(route)).send().await.unwrap();
+        assert_eq!(response.status(), 503, "{route}");
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "policy_unavailable", "{route}");
+    }
+}
+
+#[tokio::test]
+async fn retries_a_failed_first_fetch_soon() {
+    let upstream = spawn_upstream().await;
+    let platform = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&platform)
+        .await;
+    serve(3, &document(3, "deny", json!([])))
+        .mount(&platform)
+        .await;
+
+    let gateway = Gateway::spawn(
+        &format!("http://{upstream}"),
+        &platform.uri(),
+        &["--no-policy", "deny"],
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let ready = client()
+            .get(gateway.admin_url("/readyz"))
+            .send()
+            .await
+            .unwrap();
+        if ready.status() == 200 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no policy 5s after a failed first fetch, under a 1h poll interval"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let response = client().get(gateway.url("/x")).send().await.unwrap();
+    assert_eq!(response.status(), 403);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "no_matching_rule");
+    // Once a policy is in force, the next fetch waits for the interval again.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(platform.received_requests().await.unwrap().len(), 2);
 }

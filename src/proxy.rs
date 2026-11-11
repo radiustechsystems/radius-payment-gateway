@@ -81,6 +81,11 @@ impl Upstream {
         &self.base
     }
 
+    /// How long a response's headers may take, and the buffered part of a paid body after them.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// Forwards the request and returns the upstream's response with its body still streaming.
     /// The timeout covers the time to the response headers only.
     pub async fn forward(
