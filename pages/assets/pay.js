@@ -1,28 +1,13 @@
-// The payment page's script: reads the x402 challenge embedded in the page, pays it from an
-// injected wallet (EIP-1193: MetaMask and the like) by signing an EIP-3009
-// TransferWithAuthorization, sends the payment to this same URL, and reloads once the gateway
-// has settled it, so the purchase is delivered as a normal page load.
+// The payment page's script: lists the ways to pay the challenge embedded in the page, connects
+// an injected wallet (EIP-1193: MetaMask and the like), shows the wallet's balance for each
+// option, pays the chosen one by signing an EIP-3009 TransferWithAuthorization, sends it to this
+// same URL, and reloads once the gateway has settled it, so the purchase is delivered as a normal
+// page load.
 //
 // Pure helpers are exposed on `radiusPay` for tests; everything that touches the page or the
 // wallet lives in `run`.
 (function (root) {
   'use strict';
-
-  var CHAINS = {
-    72344: {
-      chainName: 'Radius Testnet',
-      rpcUrls: ['https://rpc.testnet.radiustech.xyz'],
-      blockExplorerUrls: ['https://testnet.radiustech.xyz'],
-      nativeCurrency: { name: 'RUSD', symbol: 'RUSD', decimals: 18 },
-      faucet: 'https://testnet.radiustech.xyz/wallet'
-    },
-    723487: {
-      chainName: 'Radius',
-      rpcUrls: ['https://rpc.radiustech.xyz'],
-      blockExplorerUrls: ['https://network.radiustech.xyz'],
-      nativeCurrency: { name: 'RUSD', symbol: 'RUSD', decimals: 18 }
-    }
-  };
 
   var METAMASK = 'https://metamask.io/download/';
   var SKEW_SECONDS = 600; // validAfter is set this far in the past, as the reference client does.
@@ -33,18 +18,16 @@
     return match ? Number(match[1]) : null;
   }
 
-  /**
-   * The first offer this page can pay: `exact` on an EVM network through EIP-3009 (the default
-   * transfer method). Permit2 offers need an allowance and a second signature, which this page
-   * doesn't do yet.
-   */
+  /** Whether the page can pay an offer: `exact` on an EVM network through EIP-3009. */
+  function payable(offer) {
+    var method = (offer.extra && offer.extra.assetTransferMethod) || 'eip3009';
+    return offer.scheme === 'exact' && chainIdOf(offer.network) !== null && method === 'eip3009';
+  }
+
+  /** The first offer this page can pay. */
   function pick(accepts) {
     for (var i = 0; i < (accepts || []).length; i++) {
-      var offer = accepts[i];
-      var method = (offer.extra && offer.extra.assetTransferMethod) || 'eip3009';
-      if (offer.scheme === 'exact' && chainIdOf(offer.network) !== null && method === 'eip3009') {
-        return offer;
-      }
+      if (payable(accepts[i])) return accepts[i];
     }
     return null;
   }
@@ -61,6 +44,41 @@
     var bytes = new Uint8Array(32);
     (root.crypto || root.msCrypto).getRandomValues(bytes);
     return hex(bytes);
+  }
+
+  /** `balanceOf(address)` call data. */
+  function balanceOfData(address) {
+    return '0x70a08231' + address.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  }
+
+  /** A uint256 from an ABI-encoded result (or any hex), as a BigInt; null when unreadable. */
+  function parseUint(result) {
+    if (typeof result !== 'string' || !/^0x[0-9a-fA-F]*$/.test(result)) return null;
+    return result.length > 2 ? BigInt(result) : 0n;
+  }
+
+  /** `units` of a token with `decimals` places, trailing zeros dropped, at most 6 shown. */
+  function formatUnits(units, decimals) {
+    var text = units.toString().padStart(decimals + 1, '0');
+    var whole = text.slice(0, text.length - decimals);
+    var fraction = decimals ? text.slice(text.length - decimals).slice(0, 6).replace(/0+$/, '') : '';
+    return fraction ? whole + '.' + fraction : whole;
+  }
+
+  /**
+   * Which option to select once balances are known: the current one if it's payable and the
+   * wallet can cover it, else the first payable option the wallet can cover, else the current.
+   * `balances` maps an option's index to a BigInt (or null when unknown).
+   */
+  function chooseOption(options, balances, current) {
+    var covers = function (option) {
+      var balance = balances[option.index];
+      return option.payable && typeof balance === 'bigint' && balance >= BigInt(option.amountUnits);
+    };
+    var selected = options.find(function (o) { return o.index === current; });
+    if (selected && covers(selected)) return current;
+    var first = options.find(covers);
+    return first ? first.index : current;
   }
 
   /** The EIP-712 typed data of an EIP-3009 authorization for `offer`, and the authorization. */
@@ -129,16 +147,17 @@
 
   /**
    * What to tell the buyer about a gateway answer that wasn't a success: `{text, link}`.
-   * `body` is the parsed JSON body (or null), `settlement` the decoded PAYMENT-RESPONSE (or null).
+   * `body` is the parsed JSON body (or null), `settlement` the decoded PAYMENT-RESPONSE (or null),
+   * `chain` the selected option's chain (or null).
    */
-  function errorMessage(status, body, settlement, offer) {
-    var chain = CHAINS[chainIdOf(offer && offer.network)] || {};
+  function errorMessage(status, body, settlement, option, chain) {
+    chain = chain || {};
     var reason = (body && (body.error || body.message)) || '';
     if (status === 402) {
       if (/insufficient|balance|funds/i.test(reason)) {
         return chain.faucet
-          ? { text: 'Not enough ' + (offer.extra && offer.extra.name || 'tokens') + '. Get testnet funds from the faucet.', link: chain.faucet }
-          : { text: 'Not enough funds in this wallet.' };
+          ? { text: 'Not enough ' + ((option && option.symbol) || 'tokens') + '. Get testnet funds from the faucet.', link: chain.faucet }
+          : { text: 'Not enough ' + ((option && option.symbol) || 'funds') + ' in this wallet.' };
       }
       return { text: 'Payment refused: ' + (reason || 'the payment was not accepted') + '.' };
     }
@@ -162,30 +181,37 @@
 
   root.radiusPay = {
     pick: pick,
+    payable: payable,
     buildTypedData: buildTypedData,
     encodePayload: encodePayload,
     decodeHeader: decodeHeader,
     errorMessage: errorMessage,
     chainIdOf: chainIdOf,
     shorten: shorten,
-    CHAINS: CHAINS
+    balanceOfData: balanceOfData,
+    parseUint: parseUint,
+    formatUnits: formatUnits,
+    chooseOption: chooseOption
   };
 
   if (typeof document === 'undefined') return;
 
+  function readJson(id) {
+    var block = document.getElementById(id);
+    try { return block ? JSON.parse(block.textContent) : null; } catch (e) { return null; }
+  }
+
   function run() {
-    var block = document.getElementById('x402-challenge');
-    var challenge = null;
-    try { challenge = JSON.parse(block.textContent); } catch (e) { /* no challenge: nothing to pay */ }
+    var challenge = readJson('x402-challenge');
+    var page = readJson('x402-page') || { options: [] };
+    var options = page.options || [];
     var button = document.getElementById('pay');
+    var wallet = document.getElementById('wallet');
     var status = document.getElementById('status');
     var copy = document.getElementById('copy');
     var cli = document.getElementById('cli');
     var raw = document.getElementById('challenge');
 
-    document.querySelectorAll('.address').forEach(function (el) {
-      el.textContent = shorten(el.textContent.trim());
-    });
     if (raw && challenge) raw.textContent = JSON.stringify(challenge, null, 2);
     if (status.textContent.trim()) status.classList.add('error');
 
@@ -212,15 +238,83 @@
       });
     }
 
-    var offer = challenge && pick(challenge.accepts);
-    if (!offer) {
+    var account = null;
+    var balances = {};
+    var radios = Array.prototype.slice.call(document.querySelectorAll('input[name="option"]'));
+
+    function selectedIndex() {
+      var checked = radios.find(function (r) { return r.checked; });
+      return checked ? Number(checked.value) : null;
+    }
+    function optionAt(index) {
+      return options.find(function (o) { return o.index === index; }) || null;
+    }
+    function offerAt(index) {
+      return challenge && challenge.accepts ? challenge.accepts[index] : null;
+    }
+    function select(index) {
+      radios.forEach(function (r) { r.checked = Number(r.value) === index; });
+      label();
+    }
+    function label() {
+      var option = optionAt(selectedIndex());
+      if (!account) {
+        button.textContent = 'Connect wallet';
+      } else if (option) {
+        button.textContent = 'Pay ' + option.amount + ' ' + option.symbol + ' on ' + option.networkName;
+      } else {
+        button.textContent = 'Pay';
+      }
+      button.disabled = !!account && !(option && option.payable);
+    }
+
+    radios.forEach(function (r) { r.addEventListener('change', label); });
+
+    var anyPayable = options.some(function (o) { return o.payable; });
+    if (!challenge || !anyPayable) {
       button.disabled = true;
       if (challenge) say('These terms are paid through Permit2, which this page cannot sign yet. Use the terminal command below.', 'error');
       return;
     }
-    var chain = CHAINS[chainIdOf(offer.network)];
+    label();
 
-    async function pay() {
+    function showBalance(option, balance) {
+      var el = document.querySelector('.balance[data-index="' + option.index + '"]');
+      if (!el) return;
+      el.className = 'balance';
+      if (typeof balance !== 'bigint') {
+        el.textContent = 'balance unavailable';
+        return;
+      }
+      el.textContent = formatUnits(balance, option.decimals) + ' ' + option.symbol;
+      el.classList.add(balance >= BigInt(option.amountUnits) ? 'ok' : 'insufficient');
+    }
+
+    async function readBalance(option) {
+      if (!option.chain || !option.chain.rpcUrls || !option.chain.rpcUrls[0]) return null;
+      try {
+        var response = await fetch(option.chain.rpcUrls[0], {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: option.asset, data: balanceOfData(account) }, 'latest'] })
+        });
+        var json = await response.json();
+        return parseUint(json.result);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function refreshBalances() {
+      await Promise.all(options.map(async function (option) {
+        var balance = await readBalance(option);
+        balances[option.index] = balance;
+        showBalance(option, balance);
+      }));
+      select(chooseOption(options, balances, selectedIndex()));
+    }
+
+    async function connect() {
       var ethereum = root.ethereum;
       if (!ethereum) {
         say('No wallet found. Install MetaMask to pay from this page.', 'error', METAMASK);
@@ -230,10 +324,42 @@
       try {
         say('Waiting for your wallet…');
         var accounts = await ethereum.request({ method: 'eth_requestAccounts' });
+        account = accounts && accounts[0];
+        if (!account) {
+          say('No account is connected.', 'error');
+          return;
+        }
+        wallet.textContent = 'Connected ' + shorten(account);
+        say('');
+        await refreshBalances();
+        ethereum.on && ethereum.on('accountsChanged', function (changed) {
+          account = changed && changed[0];
+          wallet.textContent = account ? 'Connected ' + shorten(account) : '';
+          if (account) refreshBalances(); else label();
+        });
+      } catch (error) {
+        say(error && error.code === 4001 ? 'You rejected the request.' : 'The wallet reported an error: ' + ((error && error.message) || error) + '.', 'error');
+      } finally {
+        label();
+      }
+    }
+
+    async function pay() {
+      var ethereum = root.ethereum;
+      var index = selectedIndex();
+      var option = optionAt(index);
+      var offer = offerAt(index);
+      if (!option || !offer || !payable(offer)) {
+        say('Choose a way to pay.', 'error');
+        return;
+      }
+      var chain = option.chain;
+      button.disabled = true;
+      try {
         var wanted = '0x' + chainIdOf(offer.network).toString(16);
         var current = await ethereum.request({ method: 'eth_chainId' });
         if (String(current).toLowerCase() !== wanted) {
-          say('Switching to ' + (chain ? chain.chainName : offer.network) + '…');
+          say('Switching to ' + option.networkName + '…');
           try {
             await ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: wanted }] });
           } catch (error) {
@@ -249,20 +375,16 @@
             say('Your wallet is on another network and would not switch.', 'error');
             return;
           }
-          accounts = await ethereum.request({ method: 'eth_accounts' });
-        }
-        var from = accounts && accounts[0];
-        if (!from) {
-          say('No account is connected.', 'error');
-          return;
+          var accounts = await ethereum.request({ method: 'eth_accounts' });
+          if (accounts && accounts[0]) account = accounts[0];
         }
 
         say('Sign the payment in your wallet');
         var now = Math.floor(Date.now() / 1000);
-        var built = buildTypedData(offer, from, now, randomNonce());
+        var built = buildTypedData(offer, account, now, randomNonce());
         var signature = await ethereum.request({
           method: 'eth_signTypedData_v4',
-          params: [from, JSON.stringify(built.typedData)]
+          params: [account, JSON.stringify(built.typedData)]
         });
 
         say('Paying…');
@@ -286,7 +408,7 @@
         var body = null;
         try { body = await response.json(); } catch (e) { /* not JSON */ }
         var settlement = decodeHeader(response.headers.get('PAYMENT-RESPONSE') || '');
-        var message = errorMessage(response.status, body, settlement, offer);
+        var message = errorMessage(response.status, body, settlement, option, chain);
         say(message.text, 'error', message.link);
       } catch (error) {
         if (error && error.code === 4001) {
@@ -295,11 +417,13 @@
           say('The wallet reported an error: ' + ((error && error.message) || error) + '.', 'error');
         }
       } finally {
-        button.disabled = false;
+        label();
       }
     }
 
-    button.addEventListener('click', pay);
+    button.addEventListener('click', function () {
+      if (account) pay(); else connect();
+    });
   }
 
   if (document.readyState === 'loading') {

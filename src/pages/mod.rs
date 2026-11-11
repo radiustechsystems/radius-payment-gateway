@@ -46,8 +46,23 @@ pub const PLACEHOLDERS: &[&str] = &[
     "error",
     "cli_command",
     "challenge_json",
+    "options_html",
+    "page_json",
     "assets_base",
 ];
+
+/// One way to pay, as the page lists it.
+#[derive(Debug, Clone)]
+pub struct PageOption {
+    /// Its index in the challenge's `accepts`.
+    pub index: usize,
+    pub amount: String,
+    pub symbol: String,
+    pub network_name: String,
+    pub pay_to: String,
+    /// Whether the page's script can pay it (EIP-3009 on an EVM network).
+    pub payable: bool,
+}
 
 pub struct Asset {
     pub body: Bytes,
@@ -71,6 +86,10 @@ pub struct PageVars {
     pub error: String,
     pub cli_command: String,
     pub challenge_json: String,
+    /// Every way to pay, in the challenge's order.
+    pub options: Vec<PageOption>,
+    /// What the page's script needs beyond the challenge (networks, balances to read), as JSON.
+    pub page_json: String,
 }
 
 pub struct Pages {
@@ -194,6 +213,11 @@ impl Pages {
             "challenge_json",
             Value::Raw(template::escape_json_script(&vars.challenge_json)),
         );
+        map.insert("options_html", Value::Raw(options_html(&vars.options)));
+        map.insert(
+            "page_json",
+            Value::Raw(template::escape_json_script(&vars.page_json)),
+        );
         map.insert("assets_base", text(&self.assets_base));
         template::render(&self.template, &map)
     }
@@ -202,6 +226,50 @@ impl Pages {
     pub fn asset(&self, relative: &str) -> Option<&Asset> {
         self.assets.get(&format!("assets/{relative}"))
     }
+}
+
+/// The ways to pay as a radio group: the first the script can pay is selected, the others it
+/// can't are listed but disabled. The script fills in balances once a wallet is connected.
+fn options_html(options: &[PageOption]) -> String {
+    let first_payable = options.iter().position(|option| option.payable);
+    let mut html =
+        String::from(r#"<div class="options" role="radiogroup" aria-label="Ways to pay">"#);
+    for (position, option) in options.iter().enumerate() {
+        let checked = first_payable == Some(position);
+        let short = if option.pay_to.len() > 12 {
+            format!(
+                "{}…{}",
+                &option.pay_to[..6],
+                &option.pay_to[option.pay_to.len() - 4..]
+            )
+        } else {
+            option.pay_to.clone()
+        };
+        html.push_str(&format!(
+            concat!(
+                r#"<label class="option-card{disabled}" data-index="{index}">"#,
+                r#"<input type="radio" name="option" value="{index}"{checked}{disabled_attr}>"#,
+                r#"<span class="option-main"><span class="option-amount">{amount} {symbol}</span>"#,
+                r#"<span class="option-network">on {network}</span></span>"#,
+                r#"<span class="option-side"><span class="balance" data-index="{index}"></span>"#,
+                r#"<span class="option-note">{note}</span></span>"#,
+                r#"<span class="option-to">to <code title="{pay_to}">{short}</code></span>"#,
+                "</label>"
+            ),
+            index = option.index,
+            disabled = if option.payable { "" } else { " disabled" },
+            disabled_attr = if option.payable { "" } else { " disabled" },
+            checked = if checked { " checked" } else { "" },
+            amount = escape_html(&option.amount),
+            symbol = escape_html(&option.symbol),
+            network = escape_html(&option.network_name),
+            note = if option.payable { "" } else { "terminal only" },
+            pay_to = escape_html(&option.pay_to),
+            short = escape_html(&short),
+        ));
+    }
+    html.push_str("</div>");
+    html
 }
 
 /// Every regular file under `root`, as (relative path with `/`, path).
@@ -268,6 +336,25 @@ mod tests {
                 "radius-cli wallet pay get 'https://api.example.com/paid/x' --threshold 0.01 -y"
                     .into(),
             challenge_json: r#"{"resource":{"description":"</script>"}}"#.into(),
+            options: vec![
+                PageOption {
+                    index: 0,
+                    amount: "0.01".into(),
+                    symbol: "SBC".into(),
+                    network_name: "Radius Testnet".into(),
+                    pay_to: "0x4373dD700774F8C3f649AC58B7EDCC112785Fe6e".into(),
+                    payable: true,
+                },
+                PageOption {
+                    index: 1,
+                    amount: "0.01".into(),
+                    symbol: "USDC".into(),
+                    network_name: "Base <Sepolia>".into(),
+                    pay_to: "0x4373dD700774F8C3f649AC58B7EDCC112785Fe6e".into(),
+                    payable: false,
+                },
+            ],
+            page_json: r#"{"options":[]}"#.into(),
         }
     }
 
@@ -282,6 +369,14 @@ mod tests {
         assert!(html.contains("https://api.example.com/paid/x?q=&quot;1&quot;"));
         assert!(html.contains(r#"{"resource":{"description":"<\/script>"}}"#));
         assert!(html.contains("https://example.com/api/_radius/assets/style.css"));
+        assert!(html.contains(r#"<input type="radio" name="option" value="0" checked>"#));
+        assert!(html.contains(r#"<input type="radio" name="option" value="1" disabled>"#));
+        assert!(html.contains("on Base &lt;Sepolia&gt;"));
+        assert!(html.contains("terminal only"));
+        assert!(html.contains(
+            r#"<code title="0x4373dD700774F8C3f649AC58B7EDCC112785Fe6e">0x4373…Fe6e</code>"#
+        ));
+        assert!(html.contains(r#"id="x402-page">{"options":[]}</script>"#));
         assert!(!html.contains("{{"));
         assert!(pages.asset("style.css").is_some());
         assert!(pages.asset("pay.js").is_some());

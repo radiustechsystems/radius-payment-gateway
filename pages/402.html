@@ -13,14 +13,12 @@
   <h1>Payment required</h1>
   <p class="description">{{description}}</p>
 
-  <dl class="terms">
-    <div><dt>Price</dt><dd class="price">{{price}}</dd></div>
-    <div><dt>Network</dt><dd>{{network_name}}</dd></div>
-    <div><dt>To</dt><dd><code class="address" title="{{pay_to}}">{{pay_to}}</code></dd></div>
-    <div><dt>For</dt><dd class="url" title="{{resource_url}}">{{resource_url}}</dd></div>
-  </dl>
+  <p class="resource" title="{{resource_url}}">{{resource_url}}</p>
 
-  <button id="pay" class="primary" type="button">Connect wallet and pay {{price}}</button>
+  {{options_html}}
+
+  <button id="pay" class="primary" type="button">Connect wallet</button>
+  <p id="wallet" class="wallet"></p>
   <p id="status" class="status" aria-live="polite">{{error}}</p>
   <p class="note">One payment, one request. Nothing is stored.</p>
 
@@ -40,6 +38,7 @@
   </details>
 </main>
 <script type="application/json" id="x402-challenge">{{challenge_json}}</script>
+<script type="application/json" id="x402-page">{{page_json}}</script>
 <script src="{{assets_base}}/pay.js"></script>
 </body>
 </html>

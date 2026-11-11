@@ -87,47 +87,99 @@ h1 {
 
 .description:empty { display: none; }
 
-.terms {
-  margin: 0 0 28px;
-  padding: 0;
-  border-top: 1px solid var(--line);
-}
-
-.terms > div {
-  display: flex;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.terms dt {
-  flex: 0 0 5.5rem;
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.875rem;
-  padding-top: 2px;
-}
-
-.terms dd {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.terms .price { font-weight: 650; }
-
-.terms code,
-.terms .url {
+.resource {
+  margin: 0 0 20px;
   font-family: var(--mono);
-  font-size: 0.875rem;
-}
-
-.terms .url {
+  font-size: 0.8125rem;
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 20px;
+}
+
+.option-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "radio main side"
+    "radio to side";
+  column-gap: 12px;
+  row-gap: 2px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.option-card:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.option-card.disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.option-card input {
+  grid-area: radio;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.option-main {
+  grid-area: main;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 6px;
+  align-items: baseline;
+}
+
+.option-amount { font-weight: 650; }
+
+.option-network {
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.option-to {
+  grid-area: to;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.option-to code { font-family: var(--mono); }
+
+.option-side {
+  grid-area: side;
+  text-align: right;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.option-side .balance { display: block; color: var(--muted); }
+.option-side .balance.ok { color: var(--ok); }
+.option-side .balance.insufficient { color: var(--error); }
+.option-side .option-note { display: block; color: var(--muted); font-size: 0.75rem; }
+
+.wallet {
+  min-height: 1.25rem;
+  margin: 10px 0 0;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.wallet:empty { display: none; }
 
 button {
   font: inherit;
