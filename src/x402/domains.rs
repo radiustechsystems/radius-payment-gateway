@@ -6,8 +6,8 @@
 use alloy_primitives::Address;
 use serde_json::{Value, json};
 
-/// SBC, "Stable Coin" version "1", on Radius and Radius testnet. SBC has no EIP-3009, so it's
-/// paid through Permit2.
+/// SBC, "Stable Coin" version "1", on Radius and Radius testnet. SBC implements EIP-3009
+/// (`transferWithAuthorization`), which the Radius facilitator settles.
 const SBC: Address = Address::new([
     0x33, 0xad, 0x9e, 0x4b, 0xd1, 0x6b, 0x69, 0xb5, 0xbf, 0xde, 0xd3, 0x7d, 0x8b, 0x5d, 0x9f, 0xf9,
     0xab, 0xa0, 0x14, 0xfb,
@@ -25,14 +25,14 @@ const KNOWN: &[Known] = &[
     Known {
         network: "eip155:723487",
         asset: SBC,
-        transfer_method: "permit2",
+        transfer_method: "eip3009",
         name: "Stable Coin",
         version: "1",
     },
     Known {
         network: "eip155:72344",
         asset: SBC,
-        transfer_method: "permit2",
+        transfer_method: "eip3009",
         name: "Stable Coin",
         version: "1",
     },
@@ -62,7 +62,7 @@ mod tests {
             .parse()
             .unwrap();
         let extra = exact_extra("eip155:72344", sbc).unwrap();
-        assert_eq!(extra["assetTransferMethod"], "permit2");
+        assert_eq!(extra["assetTransferMethod"], "eip3009");
         assert_eq!(extra["name"], "Stable Coin");
         assert_eq!(extra["version"], "1");
         assert!(exact_extra("eip155:723487", sbc).is_some());

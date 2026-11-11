@@ -42,10 +42,12 @@ decisions are the reference implementation. Accepted policy formats: `radius.pol
 The challenge offers every payment option of the rule as the policy compiled it (network, token,
 amount, recipient). What a buyer has to sign for a token (its transfer method and EIP-712 domain)
 comes from the option's facilitator: the gateway reads `GET /supported` from every facilitator a
-policy names when the policy loads, and again hourly. On Radius that means SBC through Permit2
-with the `eip2612GasSponsoring` extension declared, so a wallet holding only SBC can pay with no
-approval transaction. When a facilitator can't be read, SBC on Radius still gets the Permit2
-offer from a built-in table; other tokens get an empty `extra`, which buyers can't sign.
+policy names when the policy loads, and again hourly. EIP-3009 is offered whenever the
+facilitator settles it, as it does for SBC on Radius: one signature moves the tokens, with no
+allowance to arrange. A token the facilitator only settles through Permit2 is offered that way,
+with the `eip2612GasSponsoring` extension declared when the facilitator sponsors the approval.
+When a facilitator can't be read, SBC on Radius still gets its EIP-3009 offer from a built-in
+table; other tokens get an empty `extra`, which buyers can't sign.
 
 Error responses are JSON `{"code": "…", "message": "…"}`:
 
