@@ -1,0 +1,31 @@
+# A stand-in for the radius-platform workspace: what the vendored `policy` and `domain` crates
+# inherit from their real workspace (`workspace = true` in their manifests). Keep the versions in
+# step with radius-platform's root Cargo.toml when re-vendoring. scripts/vendor-platform.sh
+# refreshes the crates; this file is maintained by hand.
+[workspace]
+resolver = "3"
+members = ["crates/policy", "crates/domain"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+alloy-primitives = { version = "1.7.3", default-features = false, features = ["std", "serde"] }
+alloy-chains = { version = "0.2.39", default-features = false, features = ["std"] }
+ipnet = { version = "2.12.2", features = ["serde"] }
+schemars = "1.2.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10.0"
+uuid = { version = "1", features = ["v7", "serde"] }
+url = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

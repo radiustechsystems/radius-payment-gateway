@@ -1,9 +1,14 @@
+[workspace]
+exclude = ["vendor/radius-platform"]
+
 [package]
 name = "radius-gateway"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 description = "A reverse proxy that enforces a Radius Platform compiled policy in front of an API: allow, deny, rate limit, or charge with x402."
+repository = "https://github.com/radiustechsystems/radius-payment-gateway"
+license = "MIT"
 publish = false
 
 [lib]
@@ -16,10 +21,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Radius Platform: the compiled policy types and the reference evaluator (docs/gates/standard.md
-# says gates SHOULD embed it). Both crates must be pinned to the same revision, or two copies of
-# `domain` end up in the build and `policy::Compiled`'s types don't unify. Bump both together.
-policy = { git = "ssh://git@github.com/radiustechsystems/radius-platform.git", rev = "4566e185546069adcc4955d222a63e91557ca765" }
-domain = { git = "ssh://git@github.com/radiustechsystems/radius-platform.git", rev = "4566e185546069adcc4955d222a63e91557ca765" }
+# says gates SHOULD embed it), vendored from radius-platform at the commit in
+# vendor/radius-platform/COMMIT by scripts/vendor-platform.sh. Both crates come from one commit.
+policy = { path = "vendor/radius-platform/crates/policy" }
+domain = { path = "vendor/radius-platform/crates/domain" }
 alloy-primitives = { version = "1.7", default-features = false, features = ["std", "serde"] }
 uuid = { version = "1", features = ["serde"] }
 
