@@ -1038,7 +1038,6 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.1.0"
-source = "git+ssh://git@github.com/radiustechsystems/radius-platform.git?rev=4566e185546069adcc4955d222a63e91557ca765#4566e185546069adcc4955d222a63e91557ca765"
 dependencies = [
  "alloy-chains",
  "alloy-primitives",
@@ -2291,7 +2290,6 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 [[package]]
 name = "policy"
 version = "0.1.0"
-source = "git+ssh://git@github.com/radiustechsystems/radius-platform.git?rev=4566e185546069adcc4955d222a63e91557ca765#4566e185546069adcc4955d222a63e91557ca765"
 dependencies = [
  "alloy-primitives",
  "domain",

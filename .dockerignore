@@ -1,0 +1,10 @@
+.git
+target
+env
+run
+supervise
+log
+notes.txt
+.env
+*.md
+!README.md

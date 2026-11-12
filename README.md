@@ -158,6 +158,34 @@ PUBLIC_URL=https://api.example.com \
 radius-gateway
 ```
 
+### Docker
+
+A published image is built from `main` and from version tags:
+
+```sh
+docker run --rm -p 127.0.0.1:8080:8080 -p 127.0.0.1:9901:9901 \
+  -e UPSTREAM=http://host.docker.internal:3000 \
+  -e PLATFORM_API_KEY=sk_… -e ORGANIZATION_ID=org_… -e PROJECT_ID=… \
+  -e PUBLIC_URL=https://api.example.com \
+  ghcr.io/radiustechsystems/radius-gateway:main
+```
+
+Or build it yourself; the image runs the gateway as a non-root user in a distroless image:
+
+```sh
+docker build --build-arg RADIUS_GATEWAY_COMMIT=$(git rev-parse --short=9 HEAD) \
+  -t radius-gateway .
+
+docker run --rm … radius-gateway
+```
+
+Or with compose: copy `.env.example` to `.env`, fill it in, then `docker compose build` and
+`docker compose up -d`. Inside the container the gateway listens on `0.0.0.0:8080` and the admin
+listener on `0.0.0.0:9901`; publish the admin port on loopback only, as the compose file does,
+since it's unauthenticated. `host.docker.internal` reaches an API running on the Docker host.
+To customize the payment page, mount a directory, export the built-in files into it with
+`--export-pages`, and set `PAGES_DIR`.
+
 An nginx site in front of it:
 
 ```nginx
@@ -219,14 +247,21 @@ cargo test            # unit, integration and conformance tests
 cargo clippy --all-targets
 ```
 
-The policy evaluator comes from the private `radius-platform` repository, pinned by revision in
-`Cargo.toml`; both `policy` and `domain` must point at the same revision. Fetching uses the git
-CLI (`.cargo/config.toml`), so your ssh setup applies. To build against a local checkout,
-uncomment the `[patch]` block in `.cargo/config.toml`.
+The policy evaluator (the platform's `policy` and `domain` crates) is vendored under
+`vendor/radius-platform/` from the `radius-platform` repository at the commit in
+`vendor/radius-platform/COMMIT`, together with the conformance vectors in `tests/vectors/`. To
+move to a newer platform commit:
 
-`policy::Compiled` rejects fields it doesn't know. When the platform adds a field, this gateway
-logs `update the pinned radius-platform revision` and keeps enforcing the policy it has until the
-pin is bumped. Watch the platform's `docs/gates/changes.md`.
+```sh
+scripts/vendor-platform.sh ../radius-platform <commit>
+```
 
-The conformance vectors in `tests/vectors/` are copied from the platform at the commit in
-`tests/vectors/VECTORS_COMMIT`; copy them again when bumping the pin.
+then check `vendor/radius-platform/Cargo.toml` (the stand-in for the platform's workspace) still
+declares what the crates inherit, and run the tests. `policy::Compiled` rejects fields it doesn't
+know, so when the platform adds a field this gateway logs `update the pinned radius-platform
+revision` and keeps enforcing the policy it has until the vendored copy is refreshed. Watch the
+platform's `docs/gates/changes.md`.
+
+## License
+
+MIT.

@@ -6,3 +6,4 @@ env/
 run
 supervise/
 log/
+.env
