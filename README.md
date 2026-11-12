@@ -160,7 +160,7 @@ radius-gateway
 
 ### Docker
 
-A published image is built from `main` and from version tags:
+A published image is built from `main` and from version tags, for `linux/amd64` and `linux/arm64`:
 
 ```sh
 docker run --rm -p 127.0.0.1:8080:8080 -p 127.0.0.1:9901:9901 \
